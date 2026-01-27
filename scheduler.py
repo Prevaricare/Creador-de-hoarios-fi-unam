@@ -104,7 +104,9 @@ if 'materias_db' not in st.session_state:
 with st.expander("Guía de uso e instrucciones de formato", expanded=False):
     st.markdown("""
     ### Pasos para generar tu horario ideal:
-    
+
+    Puedes consultar una Guia más completa en: [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main?fbclid=IwY2xjawPl1X5leHRuA2FlbQIxMABicmlkETFlZWNxY1g3V1hOTDlJbk43c3J0YwZhcHBfaWQQMjIyMDM5MTc4ODIwMDg5MgABHnt1O2EIG39D37eH0mvnJ9y2ZZYhkkSt6ca-5dhoMyj1KXgfVpd0qHx0tgF5_aem_MjJn5H--__FX6j4c0UXAug).
+
     **1. Consulta los horarios oficiales:**
     Ve a la página de la facultad: [Horarios FI UNAM (SSA)](https://www.ssa.ingenieria.unam.mx/horarios.html).
     
