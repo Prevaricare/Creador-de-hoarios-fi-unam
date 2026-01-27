@@ -8,8 +8,11 @@ st.set_page_config(page_title="Generador de Horarios", layout="wide")
 
 # --- LÓGICA DEL PARSER ---
 def hora_a_minutos(hora_str):
-    h, m = map(int, hora_str.split(':'))
-    return h * 60 + m
+    try:
+        h, m = map(int, hora_str.split(':'))
+        return h * 60 + m
+    except:
+        return 0
 
 def extraer_intervalos(horario_str, dias_lista):
     try:
@@ -22,12 +25,15 @@ def extraer_intervalos(horario_str, dias_lista):
 
 def parsear_texto(texto_sucio, es_obligatoria):
     materias = []
+    # Detecta claves de 2, 3 y 4 dígitos seguidas de un guion
     bloques = re.split(r'(\b\d{2,4}\s+-\s+.+)', texto_sucio)
     
     for i in range(1, len(bloques), 2):
         nombre_materia = bloques[i].split('\t')[0].strip()
         cuerpo = bloques[i+1].strip()
         datos_materia = {"materia": nombre_materia, "obligatoria": es_obligatoria, "grupos": []}
+        
+        # Regex ajustado para capturar correctamente la información
         patron_grupo = r'(\d+)\s+([A-ZÁÉÍÓÚÑ\.\s]+(?:\n\(.+?\))?)\s+(?:[A-Z]\s+)?(\d{2}:\d{2}\s+a\s+\d{2}:\d{2})\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ\.,\s]+)'
         
         grupos_encontrados = re.findall(patron_grupo, cuerpo)
@@ -77,21 +83,38 @@ def calcular_score(combinacion, pesos):
     if not grupos_reales: return -1000
     
     score = 0
+    
+    # 1. HUECOS
     huecos = 0
-    for dia in ["Lun", "Mar", "Mie", "Jue", "Vie"]:
+    # Incluye "Sab" en la lista de días
+    for dia in ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]:
         clases = sorted([s for g in grupos_reales for s in g['intervalos'] if s['dia'] == dia], key=lambda x: x['inicio'])
         for i in range(len(clases)-1):
             huecos += (clases[i+1]['inicio'] - clases[i]['fin']) / 60
     score -= huecos * pesos['huecos']
     
+    # 2. PROFESORES
     promedio_p = sum(g['calificacion'] for g in grupos_reales) / len(grupos_reales)
     score += promedio_p * pesos['profes']
     
-    salidas = [s['fin'] for g in grupos_reales for s in g['intervalos']]
-    ultima_salida = max(salidas) if salidas else 1440
-    score += ((1440 - ultima_salida) / 60) * pesos['temprano']
+    # 3. TURNO (MAÑANA / TARDE / MIXTO)
+    start_times = [s['inicio'] for g in grupos_reales for s in g['intervalos']]
+    end_times = [s['fin'] for g in grupos_reales for s in g['intervalos']]
     
+    if start_times and end_times:
+        primer_inicio = min(start_times)
+        ultima_salida = max(end_times)
+        
+        if pesos['tipo_turno'] == "Mañana (Temprano)":
+            score += ((1440 - ultima_salida) / 60) * pesos['peso_turno']
+        elif pesos['tipo_turno'] == "Tarde / Noche":
+            score += (primer_inicio / 60) * pesos['peso_turno']
+        else: # Mixto
+            pass
+
+    # 4. CARGA ACADÉMICA
     score += len(grupos_reales) * pesos['carga']
+    
     return score
 
 # --- INTERFAZ DE USUARIO ---
@@ -101,69 +124,81 @@ if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
 
 # --- GUÍA DE USO DETALLADA ---
-with st.expander("Guía de uso e instrucciones de formato", expanded=False):
+with st.expander("Instrucciones de uso", expanded=False):
     st.markdown("""
-    ### Pasos para generar tu horario ideal:
+    ### Pasos rápidos:
+    Para más detalles, consulta la guía en [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main).
 
-    Puedes consultar una Guia más completa en: [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main?fbclid=IwY2xjawPl1X5leHRuA2FlbQIxMABicmlkETFlZWNxY1g3V1hOTDlJbk43c3J0YwZhcHBfaWQQMjIyMDM5MTc4ODIwMDg5MgABHnt1O2EIG39D37eH0mvnJ9y2ZZYhkkSt6ca-5dhoMyj1KXgfVpd0qHx0tgF5_aem_MjJn5H--__FX6j4c0UXAug).
+    **1. Copia:**
+    Ve a [Horarios FI UNAM](https://www.ssa.ingenieria.unam.mx/horarios.html). Selecciona y copia todo el texto de la materia (desde el nombre hasta el último grupo).
 
-    **1. Consulta los horarios oficiales:**
-    Ve a la página de la facultad: [Horarios FI UNAM (SSA)](https://www.ssa.ingenieria.unam.mx/horarios.html).
-    
-    **2. Copia la información:**
-    Selecciona y copia todo el bloque de texto de la materia que te interesa. Asegúrate de incluir desde el nombre de la materia (Ej: `1601 - COMPORTAMIENTO...`) hasta el último grupo disponible.
-    
-    **3. Pega y Procesa:**
-    Pega el texto en el cuadro de "Carga de Materias" y presiona el botón **Procesar Materia**. Repite esto con cada asignatura que quieras cursar.
-    
-    **4. Ajusta las calificaciones:**
-    En la columna derecha ("Materias Registradas"), verás las materias que cargaste. Abre el menú desplegable de cada una y **asigna una calificación del 0 al 10** a los profesores. El algoritmo usará esto para recomendarte los mejores grupos.
-    
-    **5. Genera:**
-    Presiona el botón final para que el sistema cree las mejores combinaciones posibles basándose en tus preferencias.
+    **2. Pega:**
+    Pon el texto en el cuadro "Carga de Materias" y presiona **Procesar Materia**. Repite con todas tus asignaturas.
+
+    **3. Personaliza:**
+    * **Califica:** En la lista de "Materias Registradas", asigna un 10 a tus profesores favoritos y un 0 a los que quieras evitar.
+    * **Bloquea:** Usa "Agregar Bloqueo" para reservar tiempo de trabajo, comida o transporte.
+
+    **4. Configura:**
+    En el menú de la izquierda, ajusta qué es prioridad para ti (Turno matutino/vespertino, evitar huecos, etc.).
+
+    **5. Genera y Elige:**
+    Presiona el botón **Generar combinaciones optimizadas**. Aparecerán 10 pestañas; revísalas y elige la que mejor se adapte a tu vida.
     """)
     
-    st.markdown("**Ejemplo de texto válido para copiar:**")
+    st.markdown("**Ejemplo de cómo debe verse el texto copiado:**")
     st.code("""
 1601 - COMPORTAMIENTO DE SUELOS
 ASIGNATURA IMPARTIDA POR LA DICYG
 http://escolar.ingenieria.unam.mx/asesoria/asesores/#DICYG
 GRUPOS CON VACANTES
-Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Vacantes
-1601	1	M.I. EDUARDO ALVAREZ CAZARES
-(PRESENCIAL)	T	07:00 a 08:30	Lun, Mie, Vie	25	25
-1601	2	ING. ARACELI ANGELICA SANCHEZ ENRIQUEZ
-(PRESENCIAL)	T	08:30 a 10:00	Lun, Mie, Vie	25	25
+Clave   Gpo Profesor    Tipo    Horario Días    Cupo    Vacantes
+1601    1   M.I. EDUARDO ALVAREZ CAZARES
+(PRESENCIAL)    T   07:00 a 08:30   Lun, Mie, Vie   25  25
+1601    2   ING. ARACELI ANGELICA SANCHEZ ENRIQUEZ
+(PRESENCIAL)    T   08:30 a 10:00   Lun, Mie, Vie   25  25
     """, language="text")
 
 # --- BARRA LATERAL (CONFIGURACIÓN) ---
 with st.sidebar:
     st.header("Configuración de Pesos")
-    st.info("Define qué es lo más importante para ti al armar el horario.")
+    st.info("Personaliza qué es lo más importante para ti.")
     
     st.markdown("---")
     
+    tipo_turno = st.selectbox("Preferencia de Turno", 
+                              ["Mañana (Temprano)", "Tarde / Noche", "Mixto"],
+                              help="Elige en qué momento del día prefieres tomar clases.")
+    
+    w_turno = st.slider("Importancia del Turno", 0, 100, 30,
+                        help="Qué tanto debe esforzarse el sistema por respetar tu preferencia de mañana o tarde.")
+
     w_huecos = st.slider("Minimizar horas muertas", 0, 100, 50, 
-                         help="Si aumentas este valor, el sistema buscará horarios compactos para evitar tiempos de espera entre clases.")
+                         help="Busca juntar tus clases para que no tengas tiempos libres excesivos entre ellas.")
     
     w_profes = st.slider("Calificación de profesores", 0, 100, 70, 
-                         help="Si aumentas este valor, el sistema priorizará a los profesores a los que les diste una calificación alta (10), aunque el horario sea feo.")
-    
-    w_temprano = st.slider("Preferencia salida temprana", 0, 100, 30, 
-                         help="Si aumentas este valor, el sistema intentará que tu última clase termine lo más temprano posible.")
+                         help="Da prioridad a los profesores con mayor calificación.")
     
     w_carga = st.slider("Cantidad de materias", 0, 100, 80, 
-                        help="Si aumentas este valor, el sistema priorizará meter la mayor cantidad de materias posibles en el horario.")
+                        help="Intenta inscribir el mayor número posible de materias de tu lista.")
     
-    pesos = {"huecos": w_huecos, "profes": w_profes, "temprano": w_temprano, "carga": w_carga}
+    pesos = {
+        "huecos": w_huecos, 
+        "profes": w_profes, 
+        "tipo_turno": tipo_turno, 
+        "peso_turno": w_turno, 
+        "carga": w_carga
+    }
 
 # --- COLUMNAS PRINCIPALES ---
 col_in, col_list = st.columns([1, 1.2])
 
 with col_in:
     st.subheader("1. Carga de Materias")
+    
+    # SECCIÓN 1: PEGAR TEXTO OFICIAL
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    raw_text = st.text_area("Pega el texto del portal aquí:", height=250, placeholder="Pega aquí el contenido copiado de la página de horarios...")
+    raw_text = st.text_area("Pega el texto del portal aquí:", height=200, placeholder="Pega aquí el contenido copiado de la página de horarios...")
     
     if st.button("Procesar Materia", use_container_width=True):
         nuevas = parsear_texto(raw_text, tipo == "Obligatorio")
@@ -172,7 +207,45 @@ with col_in:
             st.success(f"Se ha registrado correctamente: {len(nuevas)} materia(s).")
             st.rerun()
         else:
-            st.error("No se detectaron grupos válidos. Verifica que copiaste el encabezado de la materia y la tabla de grupos.")
+            st.error("No se detectaron grupos válidos. Verifica el formato.")
+
+    # SECCIÓN 2: AGREGAR BLOQUEO MANUAL
+    with st.expander("Agregar Actividad Manual / Bloqueo", expanded=False):
+        st.write("Define un horario ocupado (Trabajo, Comida, etc.)")
+        act_nombre = st.text_input("Nombre de la actividad", "Actividad Personal")
+        act_dias = st.multiselect("Días", ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
+        c_hora1, c_hora2 = st.columns(2)
+        t_inicio = c_hora1.time_input("Inicio")
+        t_fin = c_hora2.time_input("Fin")
+        
+        if st.button("Agregar Bloqueo"):
+            if act_nombre and act_dias:
+                # Convertimos la hora del input a formato "HH:MM a HH:MM"
+                str_horario = f"{t_inicio.strftime('%H:%M')} a {t_fin.strftime('%H:%M')}"
+                # Calculamos intervalos usando la función existente
+                intervalos_manual = extraer_intervalos(str_horario, act_dias)
+                
+                # Creamos la estructura de materia ficticia
+                materia_manual = {
+                    "materia": act_nombre,
+                    "obligatoria": True, # Obligatoria para que aparte el lugar sí o sí
+                    "grupos": [{
+                        "gpo": "Único",
+                        "profesor": "Tú",
+                        "horario": str_horario,
+                        "dias": ", ".join(act_dias),
+                        "intervalos": intervalos_manual,
+                        "calificacion": 10, # Neutral/Alta para no afectar el score
+                        "materia_nombre": act_nombre
+                    }]
+                }
+                
+                st.session_state.materias_db.append(materia_manual)
+                st.success(f"Bloqueo '{act_nombre}' agregado.")
+                st.rerun()
+            else:
+                st.error("Debes poner un nombre y seleccionar al menos un día.")
+
 
 with col_list:
     st.subheader("2. Materias Registradas")
@@ -181,12 +254,13 @@ with col_list:
     
     for i, m in enumerate(st.session_state.materias_db):
         status = " (Opcional)" if not m['obligatoria'] else ""
+        
         with st.expander(f"{m['materia']}{status}"):
             if st.button(f"Eliminar materia", key=f"del_mat_{i}"):
                 st.session_state.materias_db.pop(i)
                 st.rerun()
             
-            st.write("**Grupos detectados (ajusta la calificación):**")
+            st.write("**Grupos detectados:**")
             
             for j, g in enumerate(m['groups' if 'groups' in m else 'grupos']):
                 if g['gpo'] == "N/A": continue
@@ -195,14 +269,17 @@ with col_list:
                 c1.write(f"**Gpo {g['gpo']}**")
                 c2.write(f"{g['profesor']}\n\n{g['dias']} ({g['horario']})")
                 
-                nueva_calif = c3.number_input(
-                    "Calif:", 
-                    min_value=0, max_value=10, 
-                    value=g['calificacion'], 
-                    key=f"cal_{i}_{j}",
-                    help="10 = Excelente, 0 = Evitar"
-                )
-                st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
+                # Solo permitimos calificar si no es una actividad manual (Bloqueo)
+                # Las actividades manuales tienen "Tú" como profesor por defecto
+                if g['profesor'] != "Tú":
+                    nueva_calif = c3.number_input(
+                        "Calif:", 
+                        min_value=0, max_value=10, 
+                        value=g['calificacion'], 
+                        key=f"cal_{i}_{j}",
+                        help="10 = Excelente, 0 = Evitar"
+                    )
+                    st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
 
 st.divider()
 
@@ -235,7 +312,8 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     for h in range(7, 22):
                         horas_labels.append(f"{h:02d}:00")
                         horas_labels.append(f"{h:02d}:30")
-                    df_v = pd.DataFrame("", index=horas_labels, columns=["Lun", "Mar", "Mie", "Jue", "Vie"])
+                    
+                    df_v = pd.DataFrame("", index=horas_labels, columns=["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
                     for m_g in posibles[i]['materias']:
                         if m_g['gpo'] == "N/A": continue 
                         for s in m_g['intervalos']:
@@ -248,12 +326,14 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                                     if h_idx == start_idx:
                                         df_v.iloc[h_idx][s['dia']] = m_g['materia_nombre'][:20]
                                     elif h_idx == start_idx + 1:
-                                        df_v.iloc[h_idx][s['dia']] = m_g['profesor'][:18]
+                                        # Si es actividad personal, mostrar "Actividad", si no, el Profe
+                                        texto_sec = "Personal" if m_g['profesor'] == "Tú" else m_g['profesor'][:18]
+                                        df_v.iloc[h_idx][s['dia']] = texto_sec
                                     else:
                                         df_v.iloc[h_idx][s['dia']] = "|"
                     st.table(df_v)
         else:
-            st.warning("No se encontraron combinaciones posibles sin traslapes. Intenta marcar alguna materia como 'Opcional' o verifica los horarios.")
+            st.warning("No se encontraron combinaciones posibles sin traslapes.")
 
 # --- PIE DE PÁGINA ---
 st.markdown("---")
