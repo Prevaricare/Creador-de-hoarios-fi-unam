@@ -22,7 +22,7 @@ def extraer_intervalos(horario_str, dias_lista):
 
 def parsear_texto(texto_sucio, es_obligatoria):
     materias = []
-    # Se modificó el regex para detectar claves de 2, 3 y 4 dígitos (\d{2,4})
+    # Detecta claves de 2, 3 y 4 dígitos
     bloques = re.split(r'(\b\d{2,4}\s+-\s+.+)', texto_sucio)
     
     for i in range(1, len(bloques), 2):
@@ -99,7 +99,6 @@ st.title("Generador de Horarios")
 if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
 
-# --- GUÍA RÁPIDA ---
 with st.expander("Guía de uso e instrucciones de formato", expanded=True):
     st.write("""
     ### Instrucciones y Flujo Recomendado:
@@ -110,8 +109,6 @@ with st.expander("Guía de uso e instrucciones de formato", expanded=True):
     2. **Configuración**: Ajuste los pesos en la barra lateral según sus prioridades.
     3. **Entrada de datos**: Pegue el texto de sus materias **materia por materia** (incluyendo el nombre y encabezado).
     4. **Formato**: El sistema ahora detecta claves de **2, 3 y 4 dígitos**.
-
-    **Ejemplo de formato correcto (desde Excel):**
     """)
     st.code("""
 1601 - COMPORTAMIENTO DE SUELOS
@@ -119,13 +116,9 @@ Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Calificacion
 1601	1	M.I. EDUARDO ALVAREZ CAZARES	T	07:00 a 08:30	Lun, Mie, Vie	25	10
 1601	2	ING. ARACELI ANGELICA SANCHEZ	T	08:30 a 10:00	Lun, Mie, Vie	25	9
     """, language="text")
-    st.write("""
-    5. **Procesamiento**: Presione el botón de generar para obtener las mejores combinaciones.
-    """)
 
 with st.sidebar:
     st.header("Configuración de Pesos")
-    st.info("Determine la prioridad de cada parámetro para el cálculo del puntaje.")
     w_huecos = st.slider("Minimizar horas muertas", 0, 100, 50)
     w_profes = st.slider("Calificación de profesores", 0, 100, 70)
     w_temprano = st.slider("Preferencia salida temprana", 0, 100, 30)
@@ -137,14 +130,14 @@ col_in, col_list = st.columns([1, 1])
 with col_in:
     st.subheader("1. Carga de Materias")
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    raw_text = st.text_area("Pegue el texto de la materia aquí:", height=180, help="Pegue el bloque de texto completo de una materia (incluyendo nombre, encabezados y grupos con calificacion).")
+    raw_text = st.text_area("Pegue el texto de la materia aquí:", height=180)
     if st.button("Procesar Materia"):
         nuevas = parsear_texto(raw_text, tipo == "Obligatorio")
         if nuevas:
             st.session_state.materias_db.extend(nuevas)
             st.success(f"Registrada(s) {len(nuevas)} materia(s)")
         else:
-            st.error("Formato no reconocido. Asegúrese de incluir el nombre de la materia (Ej: 101 - Nombre) y los datos tabulados.")
+            st.error("Formato no reconocido.")
 
 with col_list:
     st.subheader("2. Materias Registradas")
@@ -160,14 +153,12 @@ with col_list:
 
 st.divider()
 
-# --- PROCESO DE GENERACIÓN ---
 if st.button("Generar combinaciones optimizadas", use_container_width=True):
     if not st.session_state.materias_db:
         st.error("Lista de materias vacía.")
     else:
         grupos_input = [m['grupos'] for m in st.session_state.materias_db]
         posibles = []
-        
         todas_comb = list(itertools.product(*grupos_input))
         progreso = st.progress(0)
         
@@ -185,20 +176,16 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
             for i, tab in enumerate(tabs):
                 with tab:
                     st.write(f"**Puntaje de Excelencia:** {posibles[i]['score']:.2f}")
-                    
                     horas_labels = []
                     for h in range(7, 22):
                         horas_labels.append(f"{h:02d}:00")
                         horas_labels.append(f"{h:02d}:30")
-
                     df_v = pd.DataFrame("", index=horas_labels, columns=["Lun", "Mar", "Mie", "Jue", "Vie"])
-                    
                     for m_g in posibles[i]['materias']:
                         if m_g['gpo'] == "N/A": continue 
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
                             h_f = f"{s['fin']//60:02d}:{'30' if (s['fin']%60 >= 30) else '00'}"
-                            
                             if h_i in horas_labels and h_f in horas_labels:
                                 start_idx = horas_labels.index(h_i)
                                 end_idx = horas_labels.index(h_f)
@@ -209,16 +196,18 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                                         df_v.iloc[h_idx][s['dia']] = m_g['profesor'][:18]
                                     else:
                                         df_v.iloc[h_idx][s['dia']] = "|"
-                    
                     st.table(df_v)
-        else:
-            st.warning("No se encontraron combinaciones viables.")
 
-# --- PIE DE PÁGINA ---
+# --- PIE DE PÁGINA CON FIRMA Y LINK A INSTAGRAM ---
 st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray; font-size: 0.8em;'>"
-    "Gael prevaricare"
-    "</div>", 
-    unsafe_allow_html=True
-)
+footer_col1, footer_col2, footer_col3 = st.columns([3, 2, 3])
+
+with footer_col2:
+    st.markdown(
+        "<div style='text-align: center; color: gray; font-size: 0.9em; padding-top: 10px;'>"
+        "Gael prevaricare"
+        "</div>", 
+        unsafe_allow_html=True
+    )
+   
+    st.link_button("Instagram", "https://www.instagram.com/gaelprevaricare/", use_container_width=True)
