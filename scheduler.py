@@ -99,12 +99,23 @@ if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
 
 # --- GUÍA RÁPIDA ---
-with st.expander("Guía de uso"):
+with st.expander("Guía de uso e instrucciones de formato"):
     st.write("""
-    1. **Configuración**: Ajuste los pesos en la barra lateral según sus prioridades (huecos, profesores, etc.).
-    2. **Entrada de datos**: Pegue el texto de sus materias una por una. Marque si son obligatorias u opcionales.
-    3. **Procesamiento**: Presione el botón de generar para obtener las 10 mejores combinaciones sin traslapes.
-    4. **Resultados**: Navegue por las pestañas para visualizar cada opción en la cuadrícula de 30 minutos.
+    ### Instrucciones:
+    1. **Configuración**: Ajuste los pesos en la barra lateral según sus prioridades.
+    2. **Entrada de datos**: Pegue el texto de sus materias **una por una**. 
+    3. **Formato requerido**: El texto debe mantener la estructura de columnas del portal (Clave, Gpo, Profesor, Tipo, Horario, Días, Cupo, Calificación).
+
+    **Ejemplo de formato correcto:**
+    """)
+    st.code("""
+1601 - COMPORTAMIENTO DE SUELOS
+Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Califiacion
+1601	1	M.I. EDUARDO ALVAREZ CAZARES	T	07:00 a 08:30	Lun, Mie, Vie	25	10
+    """, language="text")
+    st.write("""
+    4. **Procesamiento**: Presione el botón de generar para obtener las mejores combinaciones.
+    5. **Resultados**: Navegue por las pestañas para visualizar las opciones.
     """)
 
 with st.sidebar:
@@ -121,14 +132,14 @@ col_in, col_list = st.columns([1, 1])
 with col_in:
     st.subheader("1. Carga de Materias")
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    raw_text = st.text_area("Pegue el texto del portal aquí:", height=150)
+    raw_text = st.text_area("Pegue el texto de la materia aquí:", height=150, help="Pegue el bloque de texto completo de una materia incluyendo el encabezado.")
     if st.button("Procesar Materia"):
         nuevas = parsear_texto(raw_text, tipo == "Obligatorio")
         if nuevas:
             st.session_state.materias_db.extend(nuevas)
             st.success(f"Registrada(s) {len(nuevas)} materia(s)")
         else:
-            st.error("Formato no reconocido.")
+            st.error("Formato no reconocido. Asegúrese de incluir el nombre de la materia y los datos del grupo.")
 
 with col_list:
     st.subheader("2. Materias Registradas")
@@ -197,3 +208,12 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     st.table(df_v)
         else:
             st.warning("No se encontraron combinaciones viables.")
+
+# --- PIE DE PÁGINA ---
+st.markdown("---")
+st.markdown(
+    "<div style='text-align: center; color: gray; font-size: 0.8em;'>"
+    "Gael prevaricare"
+    "</div>", 
+    unsafe_allow_html=True
+)
