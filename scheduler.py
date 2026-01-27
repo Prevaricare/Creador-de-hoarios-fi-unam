@@ -22,26 +22,27 @@ def extraer_intervalos(horario_str, dias_lista):
 
 def parsear_texto(texto_sucio, es_obligatoria):
     materias = []
-    # Detecta claves de 2, 3 y 4 dígitos
     bloques = re.split(r'(\b\d{2,4}\s+-\s+.+)', texto_sucio)
     
     for i in range(1, len(bloques), 2):
         nombre_materia = bloques[i].split('\t')[0].strip()
         cuerpo = bloques[i+1].strip()
         datos_materia = {"materia": nombre_materia, "obligatoria": es_obligatoria, "grupos": []}
+        patron_grupo = r'(\d+)\s+([A-ZÁÉÍÓÚÑ\.\s]+(?:\n\(.+?\))?)\s+(?:[A-Z]\s+)?(\d{2}:\d{2}\s+a\s+\d{2}:\d{2})\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ\.,\s]+)'
         
-        patron_grupo = r'(\d+)\s+(.+?)\s+([A-Z])\s+(\d{2}:\d{2}\s+a\s+\d{2}:\d{2})\s+([\w\s,]+)\s+(\d+)\s+(\d+)'
         grupos_encontrados = re.findall(patron_grupo, cuerpo)
         
         for g in grupos_encontrados:
-            intervalos = extraer_intervalos(g[3], g[4].split(','))
+            intervalos = extraer_intervalos(g[2], g[3].split(','))
+            profesor_limpio = re.sub(r'\n\(.+?\)', '', g[1]).strip()
+            
             datos_materia["grupos"].append({
                 "gpo": g[0], 
-                "profesor": g[1].strip(), 
-                "horario": g[3],
-                "dias": g[4], 
+                "profesor": profesor_limpio, 
+                "horario": g[2],
+                "dias": g[3].strip(), 
                 "intervalos": intervalos, 
-                "calificacion": int(g[6]),
+                "calificacion": 10, 
                 "materia_nombre": nombre_materia
             })
         
@@ -99,69 +100,117 @@ st.title("Generador de Horarios")
 if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
 
-with st.expander("Guía de uso e instrucciones de formato", expanded=True):
-    st.write("""
-    ### Instrucciones y Flujo Recomendado:
-    1. **Preparación en Excel (Recomendado)**: 
-        * Copie los horarios directamente desde la página de la facultad a un archivo de Excel.
-        * Agregue una última columna titulada **Calificación** (asigne un valor del 1 al 10 a cada profesor).
-        * Seleccione y copie los datos desde Excel para pegarlos aquí.
-    2. **Configuración**: Ajuste los pesos en la barra lateral según sus prioridades.
-    3. **Entrada de datos**: Pegue el texto de sus materias **materia por materia o todas juntas** (incluyendo el nombre y encabezado).
-    4. **Formato**: El sistema ahora detecta claves de **2, 3 y 4 dígitos**.
+# --- GUÍA DE USO DETALLADA ---
+with st.expander("Guía de uso e instrucciones de formato", expanded=False):
+    st.markdown("""
+    ### Pasos para generar tu horario ideal:
+    
+    **1. Consulta los horarios oficiales:**
+    Ve a la página de la facultad: [Horarios FI UNAM (SSA)](https://www.ssa.ingenieria.unam.mx/horarios.html).
+    
+    **2. Copia la información:**
+    Selecciona y copia todo el bloque de texto de la materia que te interesa. Asegúrate de incluir desde el nombre de la materia (Ej: `1601 - COMPORTAMIENTO...`) hasta el último grupo disponible.
+    
+    **3. Pega y Procesa:**
+    Pega el texto en el cuadro de "Carga de Materias" y presiona el botón **Procesar Materia**. Repite esto con cada asignatura que quieras cursar.
+    
+    **4. Ajusta las calificaciones:**
+    En la columna derecha ("Materias Registradas"), verás las materias que cargaste. Abre el menú desplegable de cada una y **asigna una calificación del 0 al 10** a los profesores. El algoritmo usará esto para recomendarte los mejores grupos.
+    
+    **5. Genera:**
+    Presiona el botón final para que el sistema cree las mejores combinaciones posibles basándose en tus preferencias.
     """)
+    
+    st.markdown("**Ejemplo de texto válido para copiar:**")
     st.code("""
 1601 - COMPORTAMIENTO DE SUELOS
-Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Calificacion
-1601	1	M.I. EDUARDO ALVAREZ CAZARES	T	07:00 a 08:30	Lun, Mie, Vie	25	10
-1601	2	ING. ARACELI ANGELICA SANCHEZ	T	08:30 a 10:00	Lun, Mie, Vie	25	9
-1730 - HIDRAULICA DE MAQUINAS Y TRANSITORIOS							
-Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Califiacion
-1730	1	M.I. ALEJANDRO SANCHEZ HUERTA	T	08:30 a 10:00	Lun, Mie, Vie	25	9				
-1730	2	M.I. AMALIA ADRIANA CAFAGGI FELIX	T	10:00 a 11:30	Lun, Mie, Vie	25	8				
+ASIGNATURA IMPARTIDA POR LA DICYG
+http://escolar.ingenieria.unam.mx/asesoria/asesores/#DICYG
+GRUPOS CON VACANTES
+Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Vacantes
+1601	1	M.I. EDUARDO ALVAREZ CAZARES
+(PRESENCIAL)	T	07:00 a 08:30	Lun, Mie, Vie	25	25
+1601	2	ING. ARACELI ANGELICA SANCHEZ ENRIQUEZ
+(PRESENCIAL)	T	08:30 a 10:00	Lun, Mie, Vie	25	25
     """, language="text")
 
+# --- BARRA LATERAL (CONFIGURACIÓN) ---
 with st.sidebar:
     st.header("Configuración de Pesos")
-    w_huecos = st.slider("Minimizar horas muertas", 0, 100, 50)
-    w_profes = st.slider("Calificación de profesores", 0, 100, 70)
-    w_temprano = st.slider("Preferencia salida temprana", 0, 100, 30)
-    w_carga = st.slider("Cantidad de materias", 0, 100, 80)
+    st.info("Define qué es lo más importante para ti al armar el horario.")
+    
+    st.markdown("---")
+    
+    w_huecos = st.slider("Minimizar horas muertas", 0, 100, 50, 
+                         help="Si aumentas este valor, el sistema buscará horarios compactos para evitar tiempos de espera entre clases.")
+    
+    w_profes = st.slider("Calificación de profesores", 0, 100, 70, 
+                         help="Si aumentas este valor, el sistema priorizará a los profesores a los que les diste una calificación alta (10), aunque el horario sea feo.")
+    
+    w_temprano = st.slider("Preferencia salida temprana", 0, 100, 30, 
+                         help="Si aumentas este valor, el sistema intentará que tu última clase termine lo más temprano posible.")
+    
+    w_carga = st.slider("Cantidad de materias", 0, 100, 80, 
+                        help="Si aumentas este valor, el sistema priorizará meter la mayor cantidad de materias posibles en el horario.")
+    
     pesos = {"huecos": w_huecos, "profes": w_profes, "temprano": w_temprano, "carga": w_carga}
 
-col_in, col_list = st.columns([1, 1])
+# --- COLUMNAS PRINCIPALES ---
+col_in, col_list = st.columns([1, 1.2])
 
 with col_in:
     st.subheader("1. Carga de Materias")
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    raw_text = st.text_area("Pegue el texto de la materia aquí:", height=180)
-    if st.button("Procesar Materia"):
+    raw_text = st.text_area("Pega el texto del portal aquí:", height=250, placeholder="Pega aquí el contenido copiado de la página de horarios...")
+    
+    if st.button("Procesar Materia", use_container_width=True):
         nuevas = parsear_texto(raw_text, tipo == "Obligatorio")
         if nuevas:
             st.session_state.materias_db.extend(nuevas)
-            st.success(f"Registrada(s) {len(nuevas)} materia(s)")
+            st.success(f"Se ha registrado correctamente: {len(nuevas)} materia(s).")
+            st.rerun()
         else:
-            st.error("Formato no reconocido.")
+            st.error("No se detectaron grupos válidos. Verifica que copiaste el encabezado de la materia y la tabla de grupos.")
 
 with col_list:
     st.subheader("2. Materias Registradas")
     if not st.session_state.materias_db:
-        st.write("No hay materias en la lista.")
+        st.info("Tu lista está vacía. Comienza pegando una materia a la izquierda.")
+    
     for i, m in enumerate(st.session_state.materias_db):
-        col_m, col_b = st.columns([4, 1])
-        status = "(Opcional)" if not m['obligatoria'] else "(Obligatoria)"
-        col_m.write(f"**{m['materia']}** {status}")
-        if col_b.button("Eliminar", key=f"del_{i}"):
-            st.session_state.materias_db.pop(i)
-            st.rerun()
+        status = " (Opcional)" if not m['obligatoria'] else ""
+        with st.expander(f"{m['materia']}{status}"):
+            if st.button(f"Eliminar materia", key=f"del_mat_{i}"):
+                st.session_state.materias_db.pop(i)
+                st.rerun()
+            
+            st.write("**Grupos detectados (ajusta la calificación):**")
+            
+            for j, g in enumerate(m['groups' if 'groups' in m else 'grupos']):
+                if g['gpo'] == "N/A": continue
+                
+                c1, c2, c3 = st.columns([1, 3, 1.5])
+                c1.write(f"**Gpo {g['gpo']}**")
+                c2.write(f"{g['profesor']}\n\n{g['dias']} ({g['horario']})")
+                
+                nueva_calif = c3.number_input(
+                    "Calif:", 
+                    min_value=0, max_value=10, 
+                    value=g['calificacion'], 
+                    key=f"cal_{i}_{j}",
+                    help="10 = Excelente, 0 = Evitar"
+                )
+                st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
 
 st.divider()
 
+# --- BOTÓN DE GENERACIÓN ---
 if st.button("Generar combinaciones optimizadas", use_container_width=True):
     if not st.session_state.materias_db:
-        st.error("Lista de materias vacía.")
+        st.error("No puedes generar horarios sin materias. Agrega al menos una.")
     else:
         grupos_input = [m['grupos'] for m in st.session_state.materias_db]
+        
         posibles = []
         todas_comb = list(itertools.product(*grupos_input))
         progreso = st.progress(0)
@@ -201,17 +250,12 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                                     else:
                                         df_v.iloc[h_idx][s['dia']] = "|"
                     st.table(df_v)
+        else:
+            st.warning("No se encontraron combinaciones posibles sin traslapes. Intenta marcar alguna materia como 'Opcional' o verifica los horarios.")
 
-# --- PIE DE PÁGINA CON FIRMA Y LINK A INSTAGRAM ---
+# --- PIE DE PÁGINA ---
 st.markdown("---")
 footer_col1, footer_col2, footer_col3 = st.columns([3, 2, 3])
-
 with footer_col2:
-    st.markdown(
-        "<div style='text-align: center; color: gray; font-size: 0.9em; padding-top: 10px;'>"
-        "Gael prevaricare"
-        "</div>", 
-        unsafe_allow_html=True
-    )
-   
+    st.markdown("<div style='text-align: center; color: gray; font-size: 0.9em;'>Gael prevaricare</div>", unsafe_allow_html=True)
     st.link_button("Instagram", "https://www.instagram.com/gaelprevaricare/", use_container_width=True)
