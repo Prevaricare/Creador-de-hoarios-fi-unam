@@ -107,7 +107,7 @@ with st.expander("Guía de uso e instrucciones de formato", expanded=True):
         * Agregue una última columna titulada **Calificación** (asigne un valor del 1 al 10 a cada profesor).
         * Seleccione y copie los datos desde Excel para pegarlos aquí.
     2. **Configuración**: Ajuste los pesos en la barra lateral según sus prioridades.
-    3. **Entrada de datos**: Pegue el texto de sus materias **materia por materia** (incluyendo el nombre y encabezado).
+    3. **Entrada de datos**: Pegue el texto de sus materias **materia por materia o todas juntas** (incluyendo el nombre y encabezado).
     4. **Formato**: El sistema ahora detecta claves de **2, 3 y 4 dígitos**.
     """)
     st.code("""
