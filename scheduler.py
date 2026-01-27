@@ -115,6 +115,10 @@ with st.expander("Guía de uso e instrucciones de formato", expanded=True):
 Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Calificacion
 1601	1	M.I. EDUARDO ALVAREZ CAZARES	T	07:00 a 08:30	Lun, Mie, Vie	25	10
 1601	2	ING. ARACELI ANGELICA SANCHEZ	T	08:30 a 10:00	Lun, Mie, Vie	25	9
+1730 - HIDRAULICA DE MAQUINAS Y TRANSITORIOS							
+Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Califiacion
+1730	1	M.I. ALEJANDRO SANCHEZ HUERTA	T	08:30 a 10:00	Lun, Mie, Vie	25	9				
+1730	2	M.I. AMALIA ADRIANA CAFAGGI FELIX	T	10:00 a 11:30	Lun, Mie, Vie	25	8				
     """, language="text")
 
 with st.sidebar:
