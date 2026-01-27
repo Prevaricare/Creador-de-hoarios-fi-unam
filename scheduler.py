@@ -22,7 +22,8 @@ def extraer_intervalos(horario_str, dias_lista):
 
 def parsear_texto(texto_sucio, es_obligatoria):
     materias = []
-    bloques = re.split(r'(\d{3,4}\s+-\s+.+)', texto_sucio)
+    # Se modificó el regex para detectar claves de 2, 3 y 4 dígitos (\d{2,4})
+    bloques = re.split(r'(\b\d{2,4}\s+-\s+.+)', texto_sucio)
     
     for i in range(1, len(bloques), 2):
         nombre_materia = bloques[i].split('\t')[0].strip()
@@ -99,23 +100,27 @@ if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
 
 # --- GUÍA RÁPIDA ---
-with st.expander("Guía de uso e instrucciones de formato"):
+with st.expander("Guía de uso e instrucciones de formato", expanded=True):
     st.write("""
-    ### Instrucciones:
-    1. **Configuración**: Ajuste los pesos en la barra lateral según sus prioridades.
-    2. **Entrada de datos**: Pegue el texto de sus materias **una por una**. 
-    3. **Formato requerido**: El texto debe mantener la estructura de columnas del portal (Clave, Gpo, Profesor, Tipo, Horario, Días, Cupo, Calificación).
+    ### Instrucciones y Flujo Recomendado:
+    1. **Preparación en Excel (Recomendado)**: 
+        * Copie los horarios directamente desde la página de la facultad a un archivo de Excel.
+        * Agregue una última columna titulada **Calificación** (asigne un valor del 1 al 10 a cada profesor).
+        * Seleccione y copie los datos desde Excel para pegarlos aquí.
+    2. **Configuración**: Ajuste los pesos en la barra lateral según sus prioridades.
+    3. **Entrada de datos**: Pegue el texto de sus materias **materia por materia** (incluyendo el nombre y encabezado).
+    4. **Formato**: El sistema ahora detecta claves de **2, 3 y 4 dígitos**.
 
-    **Ejemplo de formato correcto:**
+    **Ejemplo de formato correcto (desde Excel):**
     """)
     st.code("""
 1601 - COMPORTAMIENTO DE SUELOS
-Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Califiacion
+Clave	Gpo	Profesor	Tipo	Horario	Días	Cupo	Calificacion
 1601	1	M.I. EDUARDO ALVAREZ CAZARES	T	07:00 a 08:30	Lun, Mie, Vie	25	10
+1601	2	ING. ARACELI ANGELICA SANCHEZ	T	08:30 a 10:00	Lun, Mie, Vie	25	9
     """, language="text")
     st.write("""
-    4. **Procesamiento**: Presione el botón de generar para obtener las mejores combinaciones.
-    5. **Resultados**: Navegue por las pestañas para visualizar las opciones.
+    5. **Procesamiento**: Presione el botón de generar para obtener las mejores combinaciones.
     """)
 
 with st.sidebar:
@@ -132,14 +137,14 @@ col_in, col_list = st.columns([1, 1])
 with col_in:
     st.subheader("1. Carga de Materias")
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    raw_text = st.text_area("Pegue el texto de la materia aquí:", height=150, help="Pegue el bloque de texto completo de una materia incluyendo el encabezado.")
+    raw_text = st.text_area("Pegue el texto de la materia aquí:", height=180, help="Pegue el bloque de texto completo de una materia (incluyendo nombre, encabezados y grupos con calificacion).")
     if st.button("Procesar Materia"):
         nuevas = parsear_texto(raw_text, tipo == "Obligatorio")
         if nuevas:
             st.session_state.materias_db.extend(nuevas)
             st.success(f"Registrada(s) {len(nuevas)} materia(s)")
         else:
-            st.error("Formato no reconocido. Asegúrese de incluir el nombre de la materia y los datos del grupo.")
+            st.error("Formato no reconocido. Asegúrese de incluir el nombre de la materia (Ej: 101 - Nombre) y los datos tabulados.")
 
 with col_list:
     st.subheader("2. Materias Registradas")
