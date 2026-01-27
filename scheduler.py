@@ -8,11 +8,8 @@ st.set_page_config(page_title="Generador de Horarios", layout="wide")
 
 # --- LÓGICA DEL PARSER ---
 def hora_a_minutos(hora_str):
-    try:
-        h, m = map(int, hora_str.split(':'))
-        return h * 60 + m
-    except:
-        return 0
+    h, m = map(int, hora_str.split(':'))
+    return h * 60 + m
 
 def extraer_intervalos(horario_str, dias_lista):
     try:
@@ -98,6 +95,7 @@ def calcular_score(combinacion, pesos):
     score += promedio_p * pesos['profes']
     
     # 3. TURNO (MAÑANA / TARDE / MIXTO)
+    # Obtenemos todos los inicios y fines de clases
     start_times = [s['inicio'] for g in grupos_reales for s in g['intervalos']]
     end_times = [s['fin'] for g in grupos_reales for s in g['intervalos']]
     
@@ -106,10 +104,15 @@ def calcular_score(combinacion, pesos):
         ultima_salida = max(end_times)
         
         if pesos['tipo_turno'] == "Mañana (Temprano)":
+            # Premia salir lo más temprano posible (maximiza el tiempo libre restante del día)
             score += ((1440 - ultima_salida) / 60) * pesos['peso_turno']
+            
         elif pesos['tipo_turno'] == "Tarde / Noche":
+            # Premia entrar lo más tarde posible
             score += (primer_inicio / 60) * pesos['peso_turno']
+            
         else: # Mixto
+            # No afecta el score por horario, se enfoca solo en profes y huecos
             pass
 
     # 4. CARGA ACADÉMICA
@@ -124,26 +127,26 @@ if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
 
 # --- GUÍA DE USO DETALLADA ---
-with st.expander("Instrucciones de uso", expanded=False):
+with st.expander("Guía de uso e instrucciones de formato", expanded=False):
     st.markdown("""
-    ### Pasos rápidos:
-    Para más detalles, consulta la guía en [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main).
+    ### Pasos para generar tu horario ideal:
 
-    **1. Copia:**
-    Ve a [Horarios FI UNAM](https://www.ssa.ingenieria.unam.mx/horarios.html). Selecciona y copia todo el texto de la materia (desde el nombre hasta el último grupo).
+    Puedes consultar una guía más completa en: [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main?fbclid=IwY2xjawPl1X5leHRuA2FlbQIxMABicmlkETFlZWNxY1g3V1hOTDlJbk43c3J0YwZhcHBfaWQQMjIyMDM5MTc4ODIwMDg5MgABHnt1O2EIG39D37eH0mvnJ9y2ZZYhkkSt6ca-5dhoMyj1KXgfVpd0qHx0tgF5_aem_MjJn5H--__FX6j4c0UXAug).
 
-    **2. Pega:**
-    Pon el texto en el cuadro "Carga de Materias" y presiona **Procesar Materia**. Repite con todas tus asignaturas.
-
-    **3. Personaliza:**
-    * **Califica:** En la lista de "Materias Registradas", asigna un 10 a tus profesores favoritos y un 0 a los que quieras evitar.
-    * **Bloquea:** Usa "Agregar Bloqueo" para reservar tiempo de trabajo, comida o transporte.
-
-    **4. Configura:**
-    En el menú de la izquierda, ajusta qué es prioridad para ti (Turno matutino/vespertino, evitar huecos, etc.).
-
-    **5. Genera y Elige:**
-    Presiona el botón **Generar combinaciones optimizadas**. Aparecerán 10 pestañas; revísalas y elige la que mejor se adapte a tu vida.
+    **1. Consulta los horarios oficiales:**
+    Entra a la página de horarios de la facultad: [Horarios FI UNAM (SSA)](https://www.ssa.ingenieria.unam.mx/horarios.html).
+    
+    **2. Copia la información:**
+    Selecciona todo el texto de la materia que te interesa. Es importante que copies desde el nombre de la materia (Ej: `1601 - COMPORTAMIENTO...`) hasta el último grupo que aparece en la lista.
+    
+    **3. Pega y Procesa:**
+    Pega el texto que copiaste en el cuadro "Carga de Materias" y presiona el botón **Procesar Materia**. Haz esto una por una con todas tus materias.
+    
+    **4. Ajusta las calificaciones:**
+    En la columna derecha verás tus materias agregadas. Abre cada una y **asigna una calificación (0 al 10)** a los profesores. El sistema usará esto para encontrar los mejores grupos para ti.
+    
+    **5. Genera:**
+    Presiona el botón "Generar combinaciones optimizadas" para ver los resultados.
     """)
     
     st.markdown("**Ejemplo de cómo debe verse el texto copiado:**")
@@ -166,6 +169,7 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # Nuevo selector de Turno
     tipo_turno = st.selectbox("Preferencia de Turno", 
                               ["Mañana (Temprano)", "Tarde / Noche", "Mixto"],
                               help="Elige en qué momento del día prefieres tomar clases.")
@@ -177,7 +181,7 @@ with st.sidebar:
                          help="Busca juntar tus clases para que no tengas tiempos libres excesivos entre ellas.")
     
     w_profes = st.slider("Calificación de profesores", 0, 100, 70, 
-                         help="Da prioridad a los profesores con mayor calificación.")
+                         help="Da prioridad a los profesores con mayor calificación, aunque el horario no sea perfecto.")
     
     w_carga = st.slider("Cantidad de materias", 0, 100, 80, 
                         help="Intenta inscribir el mayor número posible de materias de tu lista.")
@@ -195,10 +199,8 @@ col_in, col_list = st.columns([1, 1.2])
 
 with col_in:
     st.subheader("1. Carga de Materias")
-    
-    # SECCIÓN 1: PEGAR TEXTO OFICIAL
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    raw_text = st.text_area("Pega el texto del portal aquí:", height=200, placeholder="Pega aquí el contenido copiado de la página de horarios...")
+    raw_text = st.text_area("Pega el texto del portal aquí:", height=250, placeholder="Pega aquí el contenido copiado de la página de horarios...")
     
     if st.button("Procesar Materia", use_container_width=True):
         nuevas = parsear_texto(raw_text, tipo == "Obligatorio")
@@ -207,45 +209,7 @@ with col_in:
             st.success(f"Se ha registrado correctamente: {len(nuevas)} materia(s).")
             st.rerun()
         else:
-            st.error("No se detectaron grupos válidos. Verifica el formato.")
-
-    # SECCIÓN 2: AGREGAR BLOQUEO MANUAL
-    with st.expander("Agregar Actividad Manual / Bloqueo", expanded=False):
-        st.write("Define un horario ocupado (Trabajo, Comida, etc.)")
-        act_nombre = st.text_input("Nombre de la actividad", "Actividad Personal")
-        act_dias = st.multiselect("Días", ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
-        c_hora1, c_hora2 = st.columns(2)
-        t_inicio = c_hora1.time_input("Inicio")
-        t_fin = c_hora2.time_input("Fin")
-        
-        if st.button("Agregar Bloqueo"):
-            if act_nombre and act_dias:
-                # Convertimos la hora del input a formato "HH:MM a HH:MM"
-                str_horario = f"{t_inicio.strftime('%H:%M')} a {t_fin.strftime('%H:%M')}"
-                # Calculamos intervalos usando la función existente
-                intervalos_manual = extraer_intervalos(str_horario, act_dias)
-                
-                # Creamos la estructura de materia ficticia
-                materia_manual = {
-                    "materia": act_nombre,
-                    "obligatoria": True, # Obligatoria para que aparte el lugar sí o sí
-                    "grupos": [{
-                        "gpo": "Único",
-                        "profesor": "Tú",
-                        "horario": str_horario,
-                        "dias": ", ".join(act_dias),
-                        "intervalos": intervalos_manual,
-                        "calificacion": 10, # Neutral/Alta para no afectar el score
-                        "materia_nombre": act_nombre
-                    }]
-                }
-                
-                st.session_state.materias_db.append(materia_manual)
-                st.success(f"Bloqueo '{act_nombre}' agregado.")
-                st.rerun()
-            else:
-                st.error("Debes poner un nombre y seleccionar al menos un día.")
-
+            st.error("No se detectaron grupos válidos. Verifica que copiaste el encabezado de la materia y la tabla de grupos.")
 
 with col_list:
     st.subheader("2. Materias Registradas")
@@ -254,13 +218,12 @@ with col_list:
     
     for i, m in enumerate(st.session_state.materias_db):
         status = " (Opcional)" if not m['obligatoria'] else ""
-        
         with st.expander(f"{m['materia']}{status}"):
             if st.button(f"Eliminar materia", key=f"del_mat_{i}"):
                 st.session_state.materias_db.pop(i)
                 st.rerun()
             
-            st.write("**Grupos detectados:**")
+            st.write("**Grupos detectados (ajusta la calificación):**")
             
             for j, g in enumerate(m['groups' if 'groups' in m else 'grupos']):
                 if g['gpo'] == "N/A": continue
@@ -269,17 +232,14 @@ with col_list:
                 c1.write(f"**Gpo {g['gpo']}**")
                 c2.write(f"{g['profesor']}\n\n{g['dias']} ({g['horario']})")
                 
-                # Solo permitimos calificar si no es una actividad manual (Bloqueo)
-                # Las actividades manuales tienen "Tú" como profesor por defecto
-                if g['profesor'] != "Tú":
-                    nueva_calif = c3.number_input(
-                        "Calif:", 
-                        min_value=0, max_value=10, 
-                        value=g['calificacion'], 
-                        key=f"cal_{i}_{j}",
-                        help="10 = Excelente, 0 = Evitar"
-                    )
-                    st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
+                nueva_calif = c3.number_input(
+                    "Calif:", 
+                    min_value=0, max_value=10, 
+                    value=g['calificacion'], 
+                    key=f"cal_{i}_{j}",
+                    help="10 = Excelente, 0 = Evitar"
+                )
+                st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
 
 st.divider()
 
@@ -302,39 +262,102 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                 progreso.progress((idx+1)/len(todas_comb))
         
         posibles = sorted(posibles, key=lambda x: x['score'], reverse=True)[:10]
-        
         if posibles:
+            # --- SECCIÓN DE RESULTADOS MEJORADA ---
+            st.success("¡Horarios generados con éxito!")
             tabs = st.tabs([f"Opción {i+1}" for i in range(len(posibles))])
+            
+            # Paleta de colores suaves (Pastel) para mejor lectura
+            colores = [
+                "#FFCDD2", "#C5CAE9", "#B2DFDB", "#FFF9C4", "#E1BEE7", 
+                "#FFCCBC", "#D7CCC8", "#F0F4C3", "#B3E5FC", "#DCEDC8",
+                "#F8BBD0", "#CFD8DC"
+            ]
+
             for i, tab in enumerate(tabs):
                 with tab:
-                    st.write(f"**Puntaje de Excelencia:** {posibles[i]['score']:.2f}")
+                    opcion = posibles[i]
+                    st.write(f"**Puntaje de Excelencia:** {opcion['score']:.2f}")
+                    
+                    # 1. Preparar índices de tiempo (filas) de 30 min
                     horas_labels = []
                     for h in range(7, 22):
                         horas_labels.append(f"{h:02d}:00")
                         horas_labels.append(f"{h:02d}:30")
                     
-                    df_v = pd.DataFrame("", index=horas_labels, columns=["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
-                    for m_g in posibles[i]['materias']:
+                    dias_cols = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]
+                    
+                    # 2. DataFrames: Uno para el texto a mostrar, otro para el color de fondo
+                    df_text = pd.DataFrame("", index=horas_labels, columns=dias_cols)
+                    df_color = pd.DataFrame("", index=horas_labels, columns=dias_cols)
+                    
+                    # Asignar colores consistentes a cada materia
+                    materia_color_map = {}
+                    color_idx = 0
+
+                    for m_g in opcion['materias']:
                         if m_g['gpo'] == "N/A": continue 
+                        
+                        # Asignar color
+                        nombre_mat = m_g['materia_nombre']
+                        if nombre_mat not in materia_color_map:
+                            materia_color_map[nombre_mat] = colores[color_idx % len(colores)]
+                            color_idx += 1
+                        bg_color = materia_color_map[nombre_mat]
+                        
+                        # Preparar datos de texto
+                        clave = nombre_mat.split()[0] if " - " in nombre_mat else ""
+                        # Limpiar nombre (quitar clave inicial y cortar si es muy largo)
+                        nombre_limpio = nombre_mat.split(' - ')[1] if ' - ' in nombre_mat else nombre_mat
+                        nombre_limpio = (nombre_limpio[:20] + '..') if len(nombre_limpio) > 20 else nombre_limpio
+                        profesor_corto = m_g['profesor'].split('\n')[0][:18] # Tomar primera línea y acortar
+
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
                             h_f = f"{s['fin']//60:02d}:{'30' if (s['fin']%60 >= 30) else '00'}"
+                            
                             if h_i in horas_labels and h_f in horas_labels:
                                 start_idx = horas_labels.index(h_i)
                                 end_idx = horas_labels.index(h_f)
-                                for h_idx in range(start_idx, end_idx):
-                                    if h_idx == start_idx:
-                                        df_v.iloc[h_idx][s['dia']] = m_g['materia_nombre'][:20]
-                                    elif h_idx == start_idx + 1:
-                                        # Si es actividad personal, mostrar "Actividad", si no, el Profe
-                                        texto_sec = "Personal" if m_g['profesor'] == "Tú" else m_g['profesor'][:18]
-                                        df_v.iloc[h_idx][s['dia']] = texto_sec
-                                    else:
-                                        df_v.iloc[h_idx][s['dia']] = "|"
-                    st.table(df_v)
-        else:
-            st.warning("No se encontraron combinaciones posibles sin traslapes.")
+                                duracion_bloques = end_idx - start_idx
+                                
+                                # Llenar el bloque
+                                for counter, h_idx in enumerate(range(start_idx, end_idx)):
+                                    dia = s['dia']
+                                    if dia in dias_cols:
+                                        # 1. Pintar fondo (CSS) - Sin bordes internos para que parezca un bloque sólido
+                                        # Color negro para el texto para contraste
+                                        estilo = f"background-color: {bg_color}; color: #000000;"
+                                        df_color.at[horas_labels[h_idx], dia] = estilo
+                                        
+                                        # 2. Distribuir Texto INTELIGENTEMENTE (Sin usar | )
+                                        texto_celda = ""
+                                        
+                                        if duracion_bloques == 1: 
+                                            # Clase de 30 min: Todo junto apretado
+                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave}) {nombre_limpio}"
+                                        
+                                        elif duracion_bloques == 2:
+                                            # Clase de 1 hora: 
+                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})" # Fila 1: Grupo
+                                            if counter == 1: texto_celda = f"{nombre_limpio}"           # Fila 2: Materia
+                                        
+                                        elif duracion_bloques >= 3:
+                                            # Clase de 1.5h o más: Mucho espacio
+                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})" # Fila 1: Grupo
+                                            if counter == 1: texto_celda = f"{nombre_limpio}"           # Fila 2: Materia
+                                            if counter == 2: texto_celda = f"{profesor_corto}"          # Fila 3: Profe
+                                        
+                                        df_text.at[horas_labels[h_idx], dia] = texto_celda
 
+                    # 3. Renderizar con Estilos
+                    # height alto para que se vea todo sin scroll interno excesivo
+                    st.dataframe(
+                        df_text.style.apply(lambda x: df_color, axis=None),
+                        height=900, 
+                        use_container_width=True
+                    )
+                    
 # --- PIE DE PÁGINA ---
 st.markdown("---")
 footer_col1, footer_col2, footer_col3 = st.columns([3, 2, 3])
