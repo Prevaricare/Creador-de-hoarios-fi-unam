@@ -27,5 +27,10 @@ Cuando tengas todo, dale en "Generar horarios" y te muestra las 10 mejores opcio
 [Resultados]
 <img width="1303" height="997" alt="image" src="https://github.com/user-attachments/assets/01009688-bc2f-4635-a68d-73857bb6feef" />
 
+### 5. Agrega Bloqueos
+Usa "Agregar Bloqueo" para reservar tiempo de trabajo, comida o transporte con tu horario especifico y nombre
+[Bloquea]
+<img width="1382" height="987" alt="image" src="https://github.com/user-attachments/assets/558ce9a4-a915-439b-bdd0-507062357afb" />
+
 ---
 **Encontraste un fallo?** Mándame un mensaje o abre un "Issue" aquí en GitHub
