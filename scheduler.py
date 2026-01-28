@@ -779,6 +779,17 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                         nombre_limpio = (nombre_limpio[:20] + '..') if len(nombre_limpio) > 20 else nombre_limpio
                         profesor_corto = m_g['profesor'].split('\n')[0][:18]
 
+                        vacs_grupo = m_g.get("vacantes", None)
+
+                        sin_cupo = False
+                        try:
+                            if vacs_grupo is not None and int(vacs_grupo) <= 0:
+                                sin_cupo = True
+                        except:
+                            sin_cupo = False
+
+                        tag_cupo = " ⚠️SIN CUPO" if sin_cupo else ""
+
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
                             h_f = f"{s['fin']//60:02d}:{'30' if (s['fin']%60 >= 30) else '00'}"
@@ -791,21 +802,25 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                                 for counter, h_idx in enumerate(range(start_idx, end_idx)):
                                     dia = s['dia']
                                     if dia in dias_cols:
-                                        estilo = f"background-color: {bg_color}; color: #000000;"
+                                        if sin_cupo:
+                                            estilo = f"background-color: {bg_color}; color: #000000; border: 2px solid #ff4d4d;"
+                                        else:
+                                            estilo = f"background-color: {bg_color}; color: #000000;"
+
                                         df_color.at[horas_labels[h_idx], dia] = estilo
 
                                         texto_celda = ""
                                         if duracion_bloques == 1:
                                             if counter == 0:
-                                                texto_celda = f"GPO {m_g['gpo']} ({clave}) {nombre_limpio}"
+                                                texto_celda = f"GPO {m_g['gpo']} ({clave}) {nombre_limpio}{tag_cupo}"
                                         elif duracion_bloques == 2:
                                             if counter == 0:
-                                                texto_celda = f"GPO {m_g['gpo']} ({clave})"
+                                                texto_celda = f"GPO {m_g['gpo']} ({clave}){tag_cupo}"
                                             if counter == 1:
                                                 texto_celda = f"{nombre_limpio}"
                                         elif duracion_bloques >= 3:
                                             if counter == 0:
-                                                texto_celda = f"GPO {m_g['gpo']} ({clave})"
+                                                texto_celda = f"GPO {m_g['gpo']} ({clave}){tag_cupo}"
                                             if counter == 1:
                                                 texto_celda = f"{nombre_limpio}"
                                             if counter == 2:
