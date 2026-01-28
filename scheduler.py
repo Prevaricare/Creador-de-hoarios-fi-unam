@@ -2,11 +2,13 @@ import streamlit as st
 import pandas as pd
 import re
 import itertools
+import requests
+from bs4 import BeautifulSoup
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Generador de Horarios", layout="wide")
 
-# --- LÓGICA DEL PARSER ---
+# --- FUNCIONES AUXILIARES (FALTABAN ESTAS) ---
 def hora_a_minutos(hora_str):
     try:
         h, m = map(int, hora_str.split(':'))
@@ -23,44 +25,121 @@ def extraer_intervalos(horario_str, dias_lista):
     except:
         return []
 
-def parsear_texto(texto_sucio, es_obligatoria):
-    materias = []
-    # Detecta claves de 2, 3 y 4 dígitos seguidas de un guion
-    bloques = re.split(r'(\b\d{2,4}\s+-\s+.+)', texto_sucio)
+def refrescar_vacantes():
+    n_actualizados = 0
+    with st.spinner("Actualizando cupos en tiempo real..."):
+        # Iteramos sobre las materias registradas
+        for materia in st.session_state.materias_db:
+            # Extraemos la clave del nombre "1601 - SUELOS" -> "1601"
+            clave = materia['materia'].split(' - ')[0]
+            
+            # Descargamos datos frescos
+            datos_nuevos_lista = obtener_datos_unam(clave, materia['obligatoria'])
+            
+            if datos_nuevos_lista:
+                datos_nuevos = datos_nuevos_lista[0] # Tomamos la materia
+                
+                # Actualizamos grupo por grupo
+                for g_viejo in materia['grupos']:
+                    if g_viejo['gpo'] == 'N/A': continue # Ignoramos el grupo vacío
+                    
+                    # Buscamos este grupo en los datos nuevos
+                    for g_nuevo in datos_nuevos['grupos']:
+                        if g_nuevo['gpo'] == g_viejo['gpo']:
+                            g_viejo['vacantes'] = g_nuevo['vacantes']
+                            n_actualizados += 1
+                            break
+    st.success(f"Se actualizaron {n_actualizados} grupos.")
+
+# --- CARGA DE CATÁLOGO DE MATERIAS (NUEVO) ---
+@st.cache_data 
+def cargar_nombres_materias():
+    url = "https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/listaAsignatura.js"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+
+            patron = r"asignatura\['(\d+)'\]\s*=\s*'([^']+)';"
+            coincidencias = re.findall(patron, response.text)
+            
+            diccionario_nombres = {clave: nombre for clave, nombre in coincidencias}
+            return diccionario_nombres
+        else:
+            return {}
+    except Exception as e:
+        st.error(f"No se pudo cargar el catálogo de materias: {e}")
+        return {}
+
+CATALOGO_MATERIAS = cargar_nombres_materias()
+
+# --- LÓGICA DEL PARSER ---
+def obtener_datos_unam(clave_materia, es_obligatoria):
+    clave_materia = str(clave_materia)
+    # Limpiamos ceros a la izquierda para buscar en el catálogo
+    clave_int = str(int(clave_materia)) 
     
-    for i in range(1, len(bloques), 2):
-        nombre_materia = bloques[i].split('\t')[0].strip()
-        cuerpo = bloques[i+1].strip()
-        datos_materia = {"materia": nombre_materia, "obligatoria": es_obligatoria, "grupos": []}
-        
-        # Regex ajustado para capturar correctamente la información
-        patron_grupo = r'(\d+)\s+([A-ZÁÉÍÓÚÑ\.\s]+(?:\n\(.+?\))?)\s+(?:[A-Z]\s+)?(\d{2}:\d{2}\s+a\s+\d{2}:\d{2})\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ\.,\s]+)'
-        
-        grupos_encontrados = re.findall(patron_grupo, cuerpo)
-        
-        for g in grupos_encontrados:
-            intervalos = extraer_intervalos(g[2], g[3].split(','))
-            profesor_limpio = re.sub(r'\n\(.+?\)', '', g[1]).strip()
+    nombre_limpio = CATALOGO_MATERIAS.get(clave_int, "MATERIA DESCONOCIDA")
+    nombre_materia = f"{clave_int} - {nombre_limpio}"
+    
+    # URL usa la clave tal cual la ingresó el usuario o limpia (usualmente limpia)
+    url = f"https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/{clave_int}.html"
+    
+    try:
+        response = requests.get(url)
+        if response.status_code != 200: return None 
             
-            datos_materia["grupos"].append({
-                "gpo": g[0], 
-                "profesor": profesor_limpio, 
-                "horario": g[2],
-                "dias": g[3].strip(), 
-                "intervalos": intervalos, 
-                "calificacion": 10, 
-                "materia_nombre": nombre_materia
-            })
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        if not es_obligatoria and datos_materia["grupos"]:
-            datos_materia["grupos"].append({
-                "gpo": "N/A", "profesor": "N/A", "horario": "S/H",
-                "dias": "N/A", "intervalos": [], "calificacion": 0,
-                "materia_nombre": "VACIO"
-            })
+        # BUSCAMOS TODAS LAS TABLAS (Con y Sin vacantes)
+        tablas = soup.find_all('table')
+        if not tablas: return []
+        
+        datos_materia = {
+            "materia": nombre_materia,
+            "obligatoria": es_obligatoria, 
+            "grupos": []
+        }
+        
+        for tabla in tablas:
+            filas = tabla.find_all('tr')
+            for fila in filas:
+                celdas = fila.find_all('td')
+                datos = [c.get_text(strip=True) for c in celdas]
+        
+                if len(datos) < 7: continue
+                if datos[0] == "Clave": continue 
+                
+                # Extracción
+                gpo = datos[1]
+                profesor = datos[2].replace("(PRESENCIAL)", "").replace("\n", " ").strip()
+                horario = datos[4]
+                dias_str = datos[5]
+                # La columna vacantes es la última (índice 7 u -1)
+                try:
+                    vacantes = int(datos[-1])
+                except:
+                    vacantes = 0
+                
+                intervalos = extraer_intervalos(horario, dias_str.split(','))
+                
+                datos_materia["grupos"].append({
+                    "gpo": gpo,
+                    "profesor": profesor,
+                    "horario": horario,
+                    "dias": dias_str,
+                    "intervalos": intervalos,
+                    "calificacion": 10,
+                    "materia_nombre": nombre_materia,
+                    "vacantes": vacantes,        # <--- NUEVO CAMPO
+                    "activo": vacantes > 0       # <--- Por defecto: activo si hay lugar
+                })
             
-        materias.append(datos_materia)
-    return materias
+        if not datos_materia["grupos"]: return []
+        return [datos_materia]
+
+    except Exception as e:
+        st.error(f"Error técnico: {e}")
+        return []
 
 # --- LÓGICA DE VALIDACIÓN Y SCORE ---
 def hay_traslape(g1, g2):
@@ -124,40 +203,34 @@ if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
 
 # --- GUÍA DE USO DETALLADA ---
-with st.expander("Instrucciones de uso", expanded=False):
+with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     st.markdown("""
     ### Pasos rápidos:
-    Para más detalles, consulta la guía en [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main?fbclid=IwY2xjawPl1X5leHRuA2FlbQIxMABicmlkETFlZWNxY1g3V1hOTDlJbk43c3J0YwZhcHBfaWQQMjIyMDM5MTc4ODIwMDg5MgABHnt1O2EIG39D37eH0mvnJ9y2ZZYhkkSt6ca-5dhoMyj1KXgfVpd0qHx0tgF5_aem_MjJn5H--__FX6j4c0UXAug).
+    Para más detalles, consulta la guía en [GitHub](https://github.com/prevaricare/creador-de-hoarios-fi-unam/blob/main/scheduler.py).
 
-    **1. Copia:**
-    Ve a [Horarios FI UNAM](https://www.ssa.ingenieria.unam.mx/horarios.html). Selecciona y copia todo el texto de la materia (desde el nombre hasta el último grupo).
+    **1. Busca tu Clave:**
+    Si no sabes la clave de tu materia (ej. 1120, 1601), consúltala en los [Mapas Curriculares Oficiales](http://escolar.ingenieria.unam.mx/mapas/).
 
-    **2. Pega:**
-    Pon el texto en el cuadro "Carga de Materias" y presiona **Procesar Materia**. Repite con todas tus asignaturas.
+    **2. Ingresa y Agrega:**
+    Escribe la clave numérica en el menú de la izquierda (ej. `1120`) y presiona **Buscar y Agregar Materia**.
 
-    **3. Personaliza:**
-    * **Califica:** En la lista de "Materias Registradas", asigna un 10 a tus profesores favoritos y un 0 a los que quieras evitar.
-    * **Bloquea:** Usa "Agregar Bloqueo" para reservar tiempo de trabajo, comida o transporte.
+    **3. Filtra Grupos:**
+    En la lista de la derecha, verás los grupos con sus vacantes en tiempo real.
+    * **Desmarca la casilla** ☑️ de los grupos que no te interesen (o que estén llenos) para que el generador los ignore.
+    * Usa el botón **🔄 Refrescar Cupos** para actualizar las vacantes sin borrar tus materias.
 
-    **4. Configura:**
-    En el menú de la izquierda, ajusta qué es prioridad para ti (Turno matutino/vespertino, evitar huecos, etc.).
+    **4. Personaliza:**
+    * **Bloqueos:** Agrega tus horas de comida o trabajo en el panel izquierdo ("Actividad Manual").
+    * **Pesos:** En la barra lateral, ajusta qué es más importante (evitar huecos, turno matutino, etc.).
 
-    **5. Genera y Elige:**
-    Presiona el botón **Generar combinaciones optimizadas**. Aparecerán 10 pestañas; revísalas y elige la que mejor se adapte a tu vida.
+    **5. Genera:**
+    Presiona el botón al final para ver las mejores combinaciones posibles.
+
+
+    **¡Nueva Versión Automatizada!**
+    Ya no necesitas copiar y pegar texto. Ahora el sistema descarga los horarios directamente de la Facultad.
+
     """)
-    
-    st.markdown("**Ejemplo de cómo debe verse el texto copiado:**")
-    st.code("""
-1601 - COMPORTAMIENTO DE SUELOS
-ASIGNATURA IMPARTIDA POR LA DICYG
-http://escolar.ingenieria.unam.mx/asesoria/asesores/#DICYG
-GRUPOS CON VACANTES
-Clave   Gpo Profesor    Tipo    Horario Días    Cupo    Vacantes
-1601    1   M.I. EDUARDO ALVAREZ CAZARES
-(PRESENCIAL)    T   07:00 a 08:30   Lun, Mie, Vie   25  25
-1601    2   ING. ARACELI ANGELICA SANCHEZ ENRIQUEZ
-(PRESENCIAL)    T   08:30 a 10:00   Lun, Mie, Vie   25  25
-    """, language="text")
 
 # --- BARRA LATERAL (CONFIGURACIÓN) ---
 with st.sidebar:
@@ -193,50 +266,62 @@ with st.sidebar:
 # --- COLUMNAS PRINCIPALES ---
 col_in, col_list = st.columns([1, 1.2])
 
+# ==========================================
+# COLUMNA IZQUIERDA: ENTRADA DE DATOS
+# ==========================================
 with col_in:
     st.subheader("1. Carga de Materias")
     
-    # SECCIÓN 1: PEGAR TEXTO OFICIAL
+    # --- BUSCADOR DE MATERIAS UNAM ---
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    raw_text = st.text_area("Pega el texto del portal aquí:", height=200, placeholder="Pega aquí el contenido copiado de la página de horarios...")
     
-    if st.button("Procesar Materia", use_container_width=True):
-        nuevas = parsear_texto(raw_text, tipo == "Obligatorio")
-        if nuevas:
-            st.session_state.materias_db.extend(nuevas)
-            st.success(f"Se ha registrado correctamente: {len(nuevas)} materia(s).")
-            st.rerun()
+    clave_input = st.text_input("Ingresa la Clave de la Asignatura (Ej. 1120 o 152):", max_chars=4)
+    
+    if st.button("Buscar y Agregar Materia", use_container_width=True):
+        if clave_input.isdigit() and 1 <= len(clave_input) <= 4:
+            clave_limpia = str(int(clave_input))
+            
+            with st.spinner(f'Buscando clave {clave_limpia}...'):
+                nuevas = obtener_datos_unam(clave_limpia, tipo == "Obligatorio")
+                
+                if nuevas:
+                    nombre = nuevas[0]['materia']
+                    st.session_state.materias_db.extend(nuevas)
+                    st.success(f"¡Éxito! Se agregó: {nombre}")
+                    st.rerun()
+                else:
+                    st.error(f"No se encontró la materia {clave_limpia}. Verifica que la clave exista.")
         else:
-            st.error("No se detectaron grupos válidos. Verifica el formato.")
+            st.warning("Por favor ingresa una clave numérica válida.")
 
-    # SECCIÓN 2: AGREGAR BLOQUEO MANUAL
+    # --- AGREGAR ACTIVIDAD MANUAL / BLOQUEO (MOVIDO AQUÍ) ---
     with st.expander("Agregar Actividad Manual / Bloqueo", expanded=False):
-        st.write("Define un horario ocupado (Trabajo, Comida, etc.)")
+        st.info("Bloquea horarios para Trabajo, Comida, Transporte, etc.")
         act_nombre = st.text_input("Nombre de la actividad", "Actividad Personal")
         act_dias = st.multiselect("Días", ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
+        
         c_hora1, c_hora2 = st.columns(2)
         t_inicio = c_hora1.time_input("Inicio")
         t_fin = c_hora2.time_input("Fin")
         
-        if st.button("Agregar Bloqueo"):
+        if st.button("Agregar Bloqueo", use_container_width=True):
             if act_nombre and act_dias:
-                # Convertimos la hora del input a formato "HH:MM a HH:MM"
                 str_horario = f"{t_inicio.strftime('%H:%M')} a {t_fin.strftime('%H:%M')}"
-                # Calculamos intervalos usando la función existente
                 intervalos_manual = extraer_intervalos(str_horario, act_dias)
                 
-                # Creamos la estructura de materia ficticia
                 materia_manual = {
                     "materia": act_nombre,
-                    "obligatoria": True, # Obligatoria para que aparte el lugar sí o sí
+                    "obligatoria": True, 
                     "grupos": [{
                         "gpo": "Único",
                         "profesor": "Tú",
                         "horario": str_horario,
                         "dias": ", ".join(act_dias),
                         "intervalos": intervalos_manual,
-                        "calificacion": 10, # Neutral/Alta para no afectar el score
-                        "materia_nombre": act_nombre
+                        "calificacion": 10, 
+                        "materia_nombre": act_nombre,
+                        "vacantes": 999, # Siempre hay cupo para ti
+                        "activo": True
                     }]
                 }
                 
@@ -247,49 +332,78 @@ with col_in:
                 st.error("Debes poner un nombre y seleccionar al menos un día.")
 
 
+# ==========================================
+# COLUMNA DERECHA: LISTA Y GESTIÓN
+# ==========================================
 with col_list:
-    st.subheader("2. Materias Registradas")
+    c_header_1, c_header_2 = st.columns([2, 1])
+    c_header_1.subheader("2. Materias Registradas")
+    if c_header_2.button("🔄 Refrescar Cupos"):
+        refrescar_vacantes()
+        st.rerun()
+
     if not st.session_state.materias_db:
-        st.info("Tu lista está vacía. Comienza pegando una materia a la izquierda.")
+        st.info("Tu lista está vacía. Comienza ingresando una clave a la izquierda.")
     
     for i, m in enumerate(st.session_state.materias_db):
         status = " (Opcional)" if not m['obligatoria'] else ""
         
-        with st.expander(f"{m['materia']}{status}"):
-            if st.button(f"Eliminar materia", key=f"del_mat_{i}"):
+        # Expandimos por defecto para ver los grupos rápido
+        with st.expander(f"{m['materia']}{status}", expanded=True):
+            if st.button(f"🗑️ Eliminar asignatura", key=f"del_mat_{i}"):
                 st.session_state.materias_db.pop(i)
                 st.rerun()
-            
-            st.write("**Grupos detectados:**")
-            
-            for j, g in enumerate(m['groups' if 'groups' in m else 'grupos']):
+            for j, g in enumerate(m['grupos']):
                 if g['gpo'] == "N/A": continue
                 
-                c1, c2, c3 = st.columns([1, 3, 1.5])
-                c1.write(f"**Gpo {g['gpo']}**")
-                c2.write(f"{g['profesor']}\n\n{g['dias']} ({g['horario']})")
+                # Checkbox | Info | Calif
+                c_check, c_info, c_calif = st.columns([0.15, 0.65, 0.2])
                 
-                # Solo permitimos calificar si no es una actividad manual (Bloqueo)
-                # Las actividades manuales tienen "Tú" como profesor por defecto
+                activo = c_check.checkbox("", value=g.get('activo', True), key=f"chk_{i}_{j}")
+                st.session_state.materias_db[i]['grupos'][j]['activo'] = activo
+                
+                # Color de vacantes
+                vacs = g.get('vacantes', 0)
+                color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+                
+                info_html = f"""
+                <div style="font-size: 0.9em;">
+                    <strong>Gpo {g['gpo']}</strong> - {g['profesor']}<br>
+                    📅 {g['dias']} ({g['horario']})<br>
+                    Vacantes: <strong style='color: {color_vac}'>{vacs}</strong>
+                </div>
+                """
+                c_info.markdown(info_html, unsafe_allow_html=True)
+                
                 if g['profesor'] != "Tú":
-                    nueva_calif = c3.number_input(
-                        "Calif:", 
-                        min_value=0, max_value=10, 
-                        value=g['calificacion'], 
-                        key=f"cal_{i}_{j}",
-                        help="10 = Excelente, 0 = Evitar"
+                    nueva_calif = c_calif.number_input(
+                        "Calif.", 0, 10, g['calificacion'], 
+                        key=f"cal_{i}_{j}", label_visibility="collapsed"
                     )
                     st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
-
-st.divider()
-
+                
+                
 # --- BOTÓN DE GENERACIÓN ---
 if st.button("Generar combinaciones optimizadas", use_container_width=True):
     if not st.session_state.materias_db:
         st.error("No puedes generar horarios sin materias. Agrega al menos una.")
     else:
-        grupos_input = [m['grupos'] for m in st.session_state.materias_db]
+        # 1. Inicializamos la lista DENTRO del else
+        grupos_input = []
         
+        # 2. El ciclo for debe estar INDENTADO (dentro del else)
+        for m in st.session_state.materias_db:
+            grupos_validos = [g for g in m['grupos'] if g.get('activo', True)]
+            
+            if grupos_validos:
+                grupos_input.append(grupos_validos)
+            else:
+                # Si una obligatoria no tiene grupos activos, detenemos todo
+                if m['obligatoria']:
+                    st.error(f"Error: Has desactivado todos los grupos de {m['materia']}. Debes dejar al menos uno activo.")
+                    st.stop()
+        
+        # 3. Todo el resto de la lógica también va dentro del else
         posibles = []
         todas_comb = list(itertools.product(*grupos_input))
         progreso = st.progress(0)
@@ -298,17 +412,21 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
             if es_horario_valido(comb):
                 sc = calcular_score(comb, pesos)
                 posibles.append({"materias": comb, "score": sc})
+            
+            # Actualizamos barra de progreso cada 100 iteraciones
             if idx % 100 == 0:
-                progreso.progress((idx+1)/len(todas_comb))
+                progreso.progress((idx + 1) / len(todas_comb))
+        
+        # Aseguramos que la barra llegue al 100%
+        progreso.progress(1.0)
         
         posibles = sorted(posibles, key=lambda x: x['score'], reverse=True)[:10]
         
         if posibles:
-            # --- SECCIÓN DE RESULTADOS MEJORADA ---
+            # --- SECCIÓN DE RESULTADOS ---
             st.success("¡Horarios generados con éxito!")
             tabs = st.tabs([f"Opción {i+1}" for i in range(len(posibles))])
             
-            # Paleta de colores suaves (Pastel) para mejor lectura
             colores = [
                 "#FFCDD2", "#C5CAE9", "#B2DFDB", "#FFF9C4", "#E1BEE7", 
                 "#FFCCBC", "#D7CCC8", "#F0F4C3", "#B3E5FC", "#DCEDC8",
@@ -320,7 +438,6 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     opcion = posibles[i]
                     st.write(f"**Puntaje de Excelencia:** {opcion['score']:.2f}")
                     
-                    # 1. Preparar índices de tiempo (filas) de 30 min
                     horas_labels = []
                     for h in range(7, 22):
                         horas_labels.append(f"{h:02d}:00")
@@ -328,30 +445,32 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     
                     dias_cols = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]
                     
-                    # 2. DataFrames: Uno para el texto a mostrar, otro para el color de fondo
                     df_text = pd.DataFrame("", index=horas_labels, columns=dias_cols)
                     df_color = pd.DataFrame("", index=horas_labels, columns=dias_cols)
                     
-                    # Asignar colores consistentes a cada materia
                     materia_color_map = {}
                     color_idx = 0
 
                     for m_g in opcion['materias']:
                         if m_g['gpo'] == "N/A": continue 
                         
-                        # Asignar color
                         nombre_mat = m_g['materia_nombre']
                         if nombre_mat not in materia_color_map:
                             materia_color_map[nombre_mat] = colores[color_idx % len(colores)]
                             color_idx += 1
                         bg_color = materia_color_map[nombre_mat]
                         
-                        # Preparar datos de texto
-                        clave = nombre_mat.split()[0] if " - " in nombre_mat else ""
-                        # Limpiar nombre (quitar clave inicial y cortar si es muy largo)
-                        nombre_limpio = nombre_mat.split(' - ')[1] if ' - ' in nombre_mat else nombre_mat
+                        # Parseo seguro del nombre para evitar errores si el formato varía
+                        if " - " in nombre_mat:
+                            partes = nombre_mat.split(' - ')
+                            clave = partes[0]
+                            nombre_limpio = partes[1]
+                        else:
+                            clave = ""
+                            nombre_limpio = nombre_mat
+
                         nombre_limpio = (nombre_limpio[:20] + '..') if len(nombre_limpio) > 20 else nombre_limpio
-                        profesor_corto = m_g['profesor'].split('\n')[0][:18] # Tomar primera línea y acortar
+                        profesor_corto = m_g['profesor'].split('\n')[0][:18]
 
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
@@ -362,42 +481,32 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                                 end_idx = horas_labels.index(h_f)
                                 duracion_bloques = end_idx - start_idx
                                 
-                                # Llenar el bloque
                                 for counter, h_idx in enumerate(range(start_idx, end_idx)):
                                     dia = s['dia']
                                     if dia in dias_cols:
-                                        # 1. Pintar fondo (CSS) - Sin bordes internos para que parezca un bloque sólido
-                                        # Color negro para el texto para contraste
                                         estilo = f"background-color: {bg_color}; color: #000000;"
                                         df_color.at[horas_labels[h_idx], dia] = estilo
                                         
-                                        # 2. Distribuir Texto INTELIGENTEMENTE (Sin usar | )
                                         texto_celda = ""
-                                        
                                         if duracion_bloques == 1: 
-                                            # Clase de 30 min: Todo junto apretado
                                             if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave}) {nombre_limpio}"
-                                        
                                         elif duracion_bloques == 2:
-                                            # Clase de 1 hora: 
-                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})" # Fila 1: Grupo
-                                            if counter == 1: texto_celda = f"{nombre_limpio}"           # Fila 2: Materia
-                                        
+                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})"
+                                            if counter == 1: texto_celda = f"{nombre_limpio}"
                                         elif duracion_bloques >= 3:
-                                            # Clase de 1.5h o más: Mucho espacio
-                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})" # Fila 1: Grupo
-                                            if counter == 1: texto_celda = f"{nombre_limpio}"           # Fila 2: Materia
-                                            if counter == 2: texto_celda = f"{profesor_corto}"          # Fila 3: Profe
+                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})"
+                                            if counter == 1: texto_celda = f"{nombre_limpio}"
+                                            if counter == 2: texto_celda = f"{profesor_corto}"
                                         
                                         df_text.at[horas_labels[h_idx], dia] = texto_celda
 
-                    # 3. Renderizar con Estilos
-                    # height alto para que se vea todo sin scroll interno excesivo
                     st.dataframe(
                         df_text.style.apply(lambda x: df_color, axis=None),
                         height=900, 
                         use_container_width=True
                     )
+        else:
+            st.warning("No se encontraron combinaciones válidas. Intenta relajar tus restricciones (ej. permitir huecos o más turnos).")
 
 # --- PIE DE PÁGINA ---
 st.markdown("---")
