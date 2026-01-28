@@ -176,7 +176,28 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                 if datos[0] == "Clave": continue
 
                 gpo = datos[1]
-                profesor = datos[2].replace("(PRESENCIAL)", "").replace("\n", " ").strip()
+                # --- PROFESOR Y MODALIDAD (CORREGIDO) ---
+                profesor_raw = datos[2].replace("\n", " ").strip()
+
+                # Detectar modalidad por etiqueta entre paréntesis
+                modalidad = None
+                match_modalidad = re.search(r"\(([^)]+)\)", profesor_raw)
+                if match_modalidad:
+                    modalidad = match_modalidad.group(1).strip().upper()
+
+                # Limpiar etiquetas (EN LÍNEA / PRESENCIAL / etc.)
+                profesor_limpio = re.sub(r"\([^)]*\)", "", profesor_raw).strip()
+
+                # Opcional: quitar prefijos comunes (para API)
+                profesor_limpio = re.sub(
+                    r"^(ING\.|DR\.|DRA\.|M\.I\.|M\. EN I\.|MTRO\.|MTRA\.|LIC\.|ARQ\.)\s+",
+                    "",
+                    profesor_limpio,
+                    flags=re.IGNORECASE
+                ).strip()
+
+                profesor = profesor_limpio
+
                 horario = datos[4]
                 dias_str = datos[5]
                 try:
@@ -188,7 +209,9 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
 
                 datos_materia["grupos"].append({
                     "gpo": gpo,
-                    "profesor": profesor,
+                    "profesor": profesor,            # <- nombre limpio
+                    "profesor_raw": profesor_raw,    # <- opcional: guardar el original
+                    "modalidad": modalidad,          # <- NUEVO
                     "horario": horario,
                     "dias": dias_str,
                     "intervalos": intervalos,
@@ -197,11 +220,11 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                     "vacantes": vacantes,
                     "activo": vacantes > 0,
 
-                    # >>> NUEVO: sugerencia API
+                    # >>> API sugerencia (de lo anterior)
                     "api_consultado": False,
-                    "sugerencia_api": None,       # promedio (float) o None
-                    "api_num_resenas": None,      # int o None
-                    "api_nombre_match": None      # str o None
+                    "sugerencia_api": None,
+                    "api_num_resenas": None,
+                    "api_nombre_match": None
                 })
 
         if not datos_materia["grupos"]: return []
@@ -292,9 +315,12 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     * Usa **🔄 Refrescar Cupos** para actualizar vacantes sin borrar tus materias.
 
     **4. Consulta Promedios de Profesores:**
-    Dentro de cada materia, presiona **🔍 Buscar promedios (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
-    * Esta sugerencia **no modifica** tu calificación manual.
-    * Si no hay coincidencia, se mostrará **“No encontrado”**.
+    Dentro de cada materia, presiona **🔍 Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
+
+    *  Esta sugerencia **no modifica** tu calificación manual.
+    *  Si no hay coincidencia, se mostrará **“No encontrado”**.
+
+
 
     **5. Personaliza:**
     * **Bloqueos:** Agrega tus horas de comida, trabajo o traslado en el panel izquierdo ("Actividad Manual").
@@ -516,7 +542,7 @@ with col_list:
 
             # >>> NUEVO: Botón por materia para buscar promedios
             c_api_1, c_api_2 = st.columns([1, 1])
-            if c_api_1.button("🔍 Buscar promedios (IngenieriaTracker)", key=f"api_mat_{i}", use_container_width=True):
+            if c_api_1.button("🔍 Buscar sugerencias de Calificacion (IngenieriaTracker)", key=f"api_mat_{i}", use_container_width=True):
                 grupos_actualizados = 0
                 no_encontrados = 0
 
@@ -534,7 +560,7 @@ with col_list:
                         if nombre_limpio in st.session_state.api_cache_profes:
                             resultado = st.session_state.api_cache_profes[nombre_limpio]
                         else:
-                            resultado = consultar_ingenieria_tracker(nombre_original)
+                            resultado = consultar_ingenieria_tracker(g.get("profesor", ""))
                             st.session_state.api_cache_profes[nombre_limpio] = resultado
 
                         # >>> NUEVO: marcar como consultado
@@ -591,9 +617,17 @@ with col_list:
                     else:
                         sug_txt = "<span style='color:gray;'>⭐ Sugerencia API: No encontrado</span>"
 
+                # --- Mostrar grupo ---
+                vacs = g.get('vacantes', 0)
+                color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+
+                # Modalidad (EN LÍNEA / PRESENCIAL / etc.)
+                modalidad = g.get("modalidad", None)
+                modalidad_txt = f" <span style='color: #555;'>({modalidad})</span>" if modalidad else ""
+
                 info_html = f"""
                 <div style="font-size: 0.9em;">
-                    <strong>Gpo {g['gpo']}</strong> - {g['profesor']}<br>
+                    <strong>Gpo {g['gpo']}</strong> - {g['profesor']}{modalidad_txt}<br>
                     📅 {g['dias']} ({g['horario']})<br>
                     Vacantes: <strong style='color: {color_vac}'>{vacs}</strong><br>
                     {sug_txt}
@@ -602,6 +636,7 @@ with col_list:
 
                 c_info.markdown(info_html, unsafe_allow_html=True)
 
+                # --- Input de calificación manual (igual que antes) ---
                 if g['profesor'] != "Tú":
                     key_widget = f"cal_{i}_{j}"
 
