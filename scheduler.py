@@ -206,7 +206,7 @@ if 'materias_db' not in st.session_state:
 with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     st.markdown("""
     ### Pasos rápidos:
-    Para más detalles, consulta la guía en [GitHub](https://github.com/prevaricare/creador-de-hoarios-fi-unam/blob/main/scheduler.py).
+    Para más detalles, consulta la guía en [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main).
 
     **1. Busca tu Clave:**
     Si no sabes la clave de tu materia (ej. 1120, 1601), consúltala en los [Mapas Curriculares Oficiales](http://escolar.ingenieria.unam.mx/mapas/).
