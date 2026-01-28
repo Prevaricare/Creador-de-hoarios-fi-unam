@@ -95,4 +95,4 @@ Si quieres correr esto en tu propia computadora:
 
 ---
 **¿Encontraste un fallo?** Mándame un mensaje o abre un "Issue" aquí en GitHub.
-Hecho con ❤️ por [Gael Prevaricare](https://www.instagram.com/gaelprevaricare/)
+Hecho por [Gael Prevaricare](https://www.instagram.com/gaelprevaricare/)
