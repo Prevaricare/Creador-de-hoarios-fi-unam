@@ -441,7 +441,7 @@ with col_in:
         placeholder="Ejemplo: 1730 ó 1120, 1601, 32"
     )
 
-    if st.button("Buscar y Agregar Materias", use_container_width=True):
+    if st.button("Buscar y Agregar Materias", width="stretch"):
         lista_claves = [c.strip() for c in clave_input.split(',') if c.strip()]
 
         if not lista_claves:
@@ -491,7 +491,7 @@ with col_in:
         t_inicio = c_hora1.time_input("Inicio")
         t_fin = c_hora2.time_input("Fin")
 
-        if st.button("Agregar Bloqueo", use_container_width=True):
+        if st.button("Agregar Bloqueo", width="stretch"):
             if act_nombre and act_dias:
                 str_horario = f"{t_inicio.strftime('%H:%M')} a {t_fin.strftime('%H:%M')}"
                 intervalos_manual = extraer_intervalos(str_horario, act_dias)
@@ -543,7 +543,7 @@ with col_list:
 
             # >>> NUEVO: Botón por materia para buscar promedios
             c_api_1, c_api_2 = st.columns([1, 1])
-            if c_api_1.button("🔍 Buscar sugerencias de Calificacion (IngenieriaTracker)", key=f"api_mat_{i}", use_container_width=True):
+            if c_api_1.button("🔍 Buscar sugerencias de Calificacion (IngenieriaTracker)", key=f"api_mat_{i}", width="stretch"):
                 grupos_actualizados = 0
                 no_encontrados = 0
 
@@ -659,7 +659,7 @@ with col_list:
                     st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
 
 # --- BOTÓN DE GENERACIÓN ---
-if st.button("Generar combinaciones optimizadas", use_container_width=True):
+if st.button("Generar combinaciones optimizadas", width="stretch"):
     if not st.session_state.materias_db:
         st.error("No puedes generar horarios sin materias. Agrega al menos una.")
     else:
@@ -831,7 +831,7 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     st.dataframe(
                         df_text.style.apply(lambda x: df_color, axis=None),
                         height=900,
-                        use_container_width=True
+                        width="stretch"
                     )
         else:
             st.warning(
@@ -850,4 +850,4 @@ st.markdown("---")
 footer_col1, footer_col2, footer_col3 = st.columns([3, 2, 3])
 with footer_col2:
     st.markdown("<div style='text-align: center; color: gray; font-size: 0.9em;'>Gael prevaricare</div>", unsafe_allow_html=True)
-    st.link_button("Instagram", "https://www.instagram.com/gaelprevaricare/", use_container_width=True)
+    st.link_button("Instagram", "https://www.instagram.com/gaelprevaricare/", width="stretch")
