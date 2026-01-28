@@ -72,8 +72,16 @@ Explora las pestañas (Opción 1, Opción 2...) para ver las diferentes propuest
 ![Resultados]
 
 <img width="846" height="800" alt="image" src="https://github.com/user-attachments/assets/44270cc8-a871-412b-b3b6-27b00c845bc6" />
+---
+### 7. Carga Masiva de Calificaciones (experimental)
+Para agilizar el proceso de personalización, la aplicación permite importar calificaciones directamente desde una hoja de cálculo (Excel, Google Sheets). Esta función actualiza automáticamente la prioridad de los profesores basándose en tu lista personal.
 
+1.  En la barra lateral izquierda, despliega la sección **" Carga Masiva de Calificaciones desde Excel"**.
+2.  Selecciona y copia las celdas de tu tabla de Excel.
+    * *Formato ideal:* `Clave | Grupo | Profesor | Horario | Días | Calificación`
+3.  Pega el contenido en el cuadro de texto y presiona **"Aplicar Calificaciones Masivas"**.
 
+*El sistema buscará coincidencias en los nombres de los profesores y asignará las calificaciones correspondientes automáticamente.*
 ---
 
 ##  Instalación Local (Para Desarrolladores)
