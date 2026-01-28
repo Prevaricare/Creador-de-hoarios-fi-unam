@@ -27,6 +27,7 @@ En el menú lateral izquierdo, define qué es lo más importante para ti.
 * **Cantidad de materias:** Intenta meter todas las materias de tu lista.
 
 ![Configuración de Pesos]
+
 <img width="842" height="804" alt="image" src="https://github.com/user-attachments/assets/62139e48-30ea-4aa3-abdf-c91b2d41eb80" />
 *(Tip: Si solo te importa meter materias sin importar el horario, baja los otros pesos)*
 
@@ -37,6 +38,7 @@ Ya no sufras copiando tablas.
 3.  Presiona **"Buscar y Agregar Materia"**.
 
 ![Carga de Materias]
+
 <img width="844" height="798" alt="image" src="https://github.com/user-attachments/assets/3f06310d-cb2d-48bc-810a-53bec4c31522" />
 *El sistema se conectará a la DICYG/DCB y bajará los grupos al instante.*
 
@@ -47,6 +49,7 @@ Una vez cargada la materia, aparecerá en la lista de la derecha.
 * **Botón 🔄 Refrescar Cupos:** Si pasaron 10 minutos y quieres ver si se abrió un lugar, presiona este botón arriba de la lista.
 
 ![Gestión de Cupos]
+
 <img width="831" height="795" alt="image" src="https://github.com/user-attachments/assets/27a673fd-0f6e-4a85-9cd1-f26fbecc8df3" />
 
 
@@ -54,6 +57,8 @@ Una vez cargada la materia, aparecerá en la lista de la derecha.
 Asigna un valor del **0 al 10** a cada profesor.
 * **10:** ¡Quiero este profe sí o sí!
 * **0:** Evitar a toda costa (aunque si es la única opción, el sistema podría usarlo).
+
+![Calificación]
 
 <img width="844" height="801" alt="image" src="https://github.com/user-attachments/assets/786fa092-357a-4a98-8394-f6bffa219765" />
 
@@ -63,6 +68,7 @@ En la columna izquierda, despliega la sección **"Agregar Actividad Manual / Blo
 Define un horario (ej. "Trabajo" de 14:00 a 18:00) y agrégalo. El sistema lo tratará como una clase obligatoria que no se puede mover.
 
 ![Bloqueos]
+
 <img width="843" height="803" alt="image" src="https://github.com/user-attachments/assets/29d863a0-bd7b-4928-9d87-7f9e83e72969" />
 
 ### 6. Generar Horarios
@@ -72,7 +78,9 @@ Explora las pestañas (Opción 1, Opción 2...) para ver las diferentes propuest
 ![Resultados]
 
 <img width="846" height="800" alt="image" src="https://github.com/user-attachments/assets/44270cc8-a871-412b-b3b6-27b00c845bc6" />
+
 ---
+
 ### 7. Carga Masiva de Calificaciones (experimental)
 Para agilizar el proceso de personalización, la aplicación permite importar calificaciones directamente desde una hoja de cálculo (Excel, Google Sheets). Esta función actualiza automáticamente la prioridad de los profesores basándose en tu lista personal.
 
@@ -81,7 +89,8 @@ Para agilizar el proceso de personalización, la aplicación permite importar ca
     * *Formato ideal:* `Clave | Grupo | Profesor | Horario | Días | Calificación`
 3.  Pega el contenido en el cuadro de texto y presiona **"Aplicar Calificaciones Masivas"**.
 
-*El sistema buscará coincidencias en los nombres de los profesores y asignará las calificaciones correspondientes automáticamente.*
+El sistema buscará coincidencias en los nombres de los profesores y asignará las calificaciones correspondientes automáticamente.
+
 ---
 
 ##  Instalación Local (Para Desarrolladores)
