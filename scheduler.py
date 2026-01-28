@@ -6,6 +6,10 @@ import requests
 from bs4 import BeautifulSoup
 import gc
 
+# >>> NUEVO
+import urllib.parse
+import unicodedata
+
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Generador de Horarios", layout="wide")
 
@@ -26,20 +30,87 @@ def extraer_intervalos(horario_str, dias_lista):
     except:
         return []
 
+# >>> NUEVO: limpiar nombres para mejorar coincidencia en API
+def limpiar_nombre_profesor(nombre):
+    if not nombre:
+        return ""
+
+    # Quitar etiquetas y saltos raros
+    n = nombre.replace("(PRESENCIAL)", "").replace("\n", " ").strip()
+
+    # Normalizar espacios
+    n = re.sub(r"\s+", " ", n)
+
+    # Quitar prefijos comunes (puedes añadir más si aparecen)
+    prefijos = [
+        "M. EN I.", "M EN I.", "M.I.", "MI.", "M I.",
+        "DR.", "DRA.", "MTRO.", "MTRA.", "LIC.", "ING.", "ISC.",
+        "M.C.", "M C.", "M.A.", "M A.", "PROF.", "ARQ."
+    ]
+
+    # Eliminar prefijo si viene al inicio
+    upper_n = n.upper()
+    for p in prefijos:
+        if upper_n.startswith(p):
+            n = n[len(p):].strip()
+            break
+
+    # Quitar puntos extra
+    n = n.replace(".", " ")
+
+    # Normalizar acentos (Sánchez -> Sanchez)
+    n = unicodedata.normalize("NFD", n)
+    n = "".join(ch for ch in n if unicodedata.category(ch) != "Mn")
+
+    # Normalizar espacios otra vez
+    n = re.sub(r"\s+", " ", n).strip()
+
+    return n
+
+# >>> NUEVO: consulta API IngenieriaTracker (solo devuelve sugerencia)
+def consultar_ingenieria_tracker(nombre_profesor):
+    """
+    Retorna dict con:
+      - promedio (float) o None
+      - num_resenas (int) o None
+      - nombre_api (str) o None
+    """
+    nombre_limpio = limpiar_nombre_profesor(nombre_profesor)
+    if not nombre_limpio:
+        return {"promedio": None, "num_resenas": None, "nombre_api": None}
+
+    nombre_url = urllib.parse.quote(nombre_limpio)
+    url = f"https://api.ingenieriatracker.com/searchProfesor?name={nombre_url}"
+
+    try:
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            datos = response.json()
+            if datos and len(datos) > 0:
+                primero = datos[0]
+                return {
+                    "promedio": primero.get("promedio", None),
+                    "num_resenas": primero.get("num_resenas", None),
+                    "nombre_api": primero.get("nombre", None),
+                }
+        return {"promedio": None, "num_resenas": None, "nombre_api": None}
+    except:
+        return {"promedio": None, "num_resenas": None, "nombre_api": None}
+
 def refrescar_vacantes():
     n_actualizados = 0
     with st.spinner("Actualizando cupos en tiempo real..."):
         for materia in st.session_state.materias_db:
             clave = materia['materia'].split(' - ')[0]
-            
+
             datos_nuevos_lista = obtener_datos_unam(clave, materia['obligatoria'])
-            
+
             if datos_nuevos_lista:
                 datos_nuevos = datos_nuevos_lista[0]
-                
+
                 for g_viejo in materia['grupos']:
-                    if g_viejo['gpo'] == 'N/A': continue 
-                    
+                    if g_viejo['gpo'] == 'N/A': continue
+
                     for g_nuevo in datos_nuevos['grupos']:
                         if g_nuevo['gpo'] == g_viejo['gpo']:
                             g_viejo['vacantes'] = g_nuevo['vacantes']
@@ -48,7 +119,7 @@ def refrescar_vacantes():
     st.success(f"Se actualizaron {n_actualizados} grupos.")
 
 # --- CARGA DE CATÁLOGO DE MATERIAS ---
-@st.cache_data 
+@st.cache_data
 def cargar_nombres_materias():
     url = "https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/listaAsignatura.js"
     try:
@@ -56,7 +127,7 @@ def cargar_nombres_materias():
         if response.status_code == 200:
             patron = r"asignatura\['(\d+)'\]\s*=\s*'([^']+)';"
             coincidencias = re.findall(patron, response.text)
-            
+
             diccionario_nombres = {clave: nombre for clave, nombre in coincidencias}
             return diccionario_nombres
         else:
@@ -73,37 +144,37 @@ CATALOGO_MATERIAS = cargar_nombres_materias()
 # --- LÓGICA DEL PARSER ---
 def obtener_datos_unam(clave_materia, es_obligatoria):
     clave_materia = str(clave_materia)
-    clave_int = str(int(clave_materia)) 
-    
+    clave_int = str(int(clave_materia))
+
     nombre_limpio = CATALOGO_MATERIAS.get(clave_int, "MATERIA DESCONOCIDA")
     nombre_materia = f"{clave_int} - {nombre_limpio}"
-    
+
     url = f"https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/{clave_int}.html"
-    
+
     try:
         response = requests.get(url, timeout=5)
-        if response.status_code != 200: return None 
-            
+        if response.status_code != 200: return None
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        
+
         tablas = soup.find_all('table')
         if not tablas: return []
-        
+
         datos_materia = {
             "materia": nombre_materia,
-            "obligatoria": es_obligatoria, 
+            "obligatoria": es_obligatoria,
             "grupos": []
         }
-        
+
         for tabla in tablas:
             filas = tabla.find_all('tr')
             for fila in filas:
                 celdas = fila.find_all('td')
                 datos = [c.get_text(strip=True) for c in celdas]
-        
+
                 if len(datos) < 7: continue
-                if datos[0] == "Clave": continue 
-                
+                if datos[0] == "Clave": continue
+
                 gpo = datos[1]
                 profesor = datos[2].replace("(PRESENCIAL)", "").replace("\n", " ").strip()
                 horario = datos[4]
@@ -112,9 +183,9 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                     vacantes = int(datos[-1])
                 except:
                     vacantes = 0
-                
+
                 intervalos = extraer_intervalos(horario, dias_str.split(','))
-                
+
                 datos_materia["grupos"].append({
                     "gpo": gpo,
                     "profesor": profesor,
@@ -124,9 +195,15 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                     "calificacion": 10,
                     "materia_nombre": nombre_materia,
                     "vacantes": vacantes,
-                    "activo": vacantes > 0
+                    "activo": vacantes > 0,
+
+                    # >>> NUEVO: sugerencia API
+                    "api_consultado": False,
+                    "sugerencia_api": None,       # promedio (float) o None
+                    "api_num_resenas": None,      # int o None
+                    "api_nombre_match": None      # str o None
                 })
-            
+
         if not datos_materia["grupos"]: return []
         return [datos_materia]
 
@@ -136,7 +213,7 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
     except Exception as e:
         st.error(f"Error técnico: {e}")
         return []
-        
+
 # --- LÓGICA DE VALIDACIÓN Y SCORE ---
 def hay_traslape(g1, g2):
     for s1 in g1['intervalos']:
@@ -156,26 +233,26 @@ def es_horario_valido(combinacion):
 def calcular_score(combinacion, pesos):
     grupos_reales = [g for g in combinacion if g['gpo'] != "N/A"]
     if not grupos_reales: return -1000
-    
+
     score = 0
-    
+
     huecos = 0
     for dia in ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]:
         clases = sorted([s for g in grupos_reales for s in g['intervalos'] if s['dia'] == dia], key=lambda x: x['inicio'])
         for i in range(len(clases)-1):
             huecos += (clases[i+1]['inicio'] - clases[i]['fin']) / 60
     score -= huecos * pesos['huecos']
-    
+
     promedio_p = sum(g['calificacion'] for g in grupos_reales) / len(grupos_reales)
     score += promedio_p * pesos['profes']
-    
+
     start_times = [s['inicio'] for g in grupos_reales for s in g['intervalos']]
     end_times = [s['fin'] for g in grupos_reales for s in g['intervalos']]
-    
+
     if start_times and end_times:
         primer_inicio = min(start_times)
         ultima_salida = max(end_times)
-        
+
         if pesos['tipo_turno'] == "Mañana (Temprano)":
             score += ((1440 - ultima_salida) / 60) * pesos['peso_turno']
         elif pesos['tipo_turno'] == "Tarde / Noche":
@@ -184,7 +261,7 @@ def calcular_score(combinacion, pesos):
             pass
 
     score += len(grupos_reales) * pesos['carga']
-    
+
     return score
 
 # --- INTERFAZ DE USUARIO ---
@@ -192,6 +269,10 @@ st.title("Generador de Horarios")
 
 if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
+
+# >>> NUEVO: cache local de consultas API (para no repetir)
+if "api_cache_profes" not in st.session_state:
+    st.session_state.api_cache_profes = {}
 
 # --- GUÍA DE USO DETALLADA ---
 with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
@@ -203,74 +284,78 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     Si no sabes la clave de tu materia (ej. 1120, 1601), consúltala en los [Mapas Curriculares Oficiales](http://escolar.ingenieria.unam.mx/mapas/).
 
     **2. Ingresa y Agrega:**
-    Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej.`1730` ó `1120, 1601, 32`) y presiona **Buscar y Agregar Materias**.
+    Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej. `1730` o `1120, 1601, 32`) y presiona **Buscar y Agregar Materias**.
 
-    **3. Filtra Grupos:**
-    En la lista de la derecha, verás los grupos con sus vacantes en tiempo real.
-    * **Desmarca la casilla** ☑️ de los grupos que no te interesen (o que estén llenos) para que el generador los ignore.
-    * Usa el botón **🔄 Refrescar Cupos** para actualizar las vacantes sin borrar tus materias.
+    **3. Revisa Grupos y Cupos:**
+    En la lista de la derecha verás los grupos disponibles con sus vacantes.
+    * **Desmarca la casilla** ☑️ de los grupos que no te interesen para que el generador los ignore.
+    * Usa **🔄 Refrescar Cupos** para actualizar vacantes sin borrar tus materias.
 
-    **4. Personaliza:**
-    * **Bloqueos:** Agrega tus horas de comida o trabajo en el panel izquierdo ("Actividad Manual").
-    * **Pesos:** En la barra lateral, ajusta qué es más importante (evitar huecos, turno matutino, etc.).
+    **4. Consulta Promedios de Profesores:**
+    Dentro de cada materia, presiona **🔍 Buscar promedios (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
+    * Esta sugerencia **no modifica** tu calificación manual.
+    * Si no hay coincidencia, se mostrará **“No encontrado”**.
 
-    **5. Genera:**
+    **5. Personaliza:**
+    * **Bloqueos:** Agrega tus horas de comida, trabajo o traslado en el panel izquierdo ("Actividad Manual").
+    * **Pesos:** En la barra lateral, ajusta qué es más importante (evitar huecos, preferencia de turno, etc.).
+
+    **6. Genera:**
     Presiona el botón al final para ver las mejores combinaciones posibles.
 
-
-    **¡Nueva Versión Automatizada!**
-    Ya no necesitas copiar y pegar texto. Ahora el sistema descarga los horarios directamente de la Facultad.
-
+    **Versión Automatizada:**
+    El sistema descarga los horarios directamente desde la Facultad, sin necesidad de copiar y pegar.
     """)
+
 
 # --- BARRA LATERAL (CONFIGURACIÓN) ---
 with st.sidebar:
     st.header("Configuración de Pesos")
     st.info("Personaliza qué es lo más importante para ti.")
-    
+
     st.markdown("---")
-    
-    tipo_turno = st.selectbox("Preferencia de Turno", 
+
+    tipo_turno = st.selectbox("Preferencia de Turno",
                               ["Mañana (Temprano)", "Tarde / Noche", "Mixto"],
                               help="Elige en qué momento del día prefieres tomar clases.")
-    
+
     w_turno = st.slider("Importancia del Turno", 0, 100, 30,
                         help="Qué tanto debe esforzarse el sistema por respetar tu preferencia de mañana o tarde.")
 
-    w_huecos = st.slider("Minimizar horas muertas", 0, 100, 50, 
+    w_huecos = st.slider("Minimizar horas muertas", 0, 100, 50,
                          help="Busca juntar tus clases para que no tengas tiempos libres excesivos entre ellas.")
-    
-    w_profes = st.slider("Calificación de profesores", 0, 100, 70, 
+
+    w_profes = st.slider("Calificación de profesores", 0, 100, 70,
                          help="Da prioridad a los profesores con mayor calificación.")
-    
-    w_carga = st.slider("Cantidad de materias", 0, 100, 80, 
+
+    w_carga = st.slider("Cantidad de materias", 0, 100, 80,
                         help="Intenta inscribir el mayor número posible de materias de tu lista.")
-    
+
     pesos = {
-        "huecos": w_huecos, 
-        "profes": w_profes, 
-        "tipo_turno": tipo_turno, 
-        "peso_turno": w_turno, 
+        "huecos": w_huecos,
+        "profes": w_profes,
+        "tipo_turno": tipo_turno,
+        "peso_turno": w_turno,
         "carga": w_carga
     }
-    
+
     st.markdown("---")
-    
+
     # --- CARGA MASIVA DE CALIFICACIONES ---
     with st.expander(" Carga Masiva de Calificaciones desde Excel `experimental`", expanded=False):
         st.info("Pega aquí tus celdas de Excel. El sistema buscará el nombre del profesor y actualizará su nota.")
-        
+
         st.markdown("ℹ **Para más información y ejemplos:** [Ver guía en GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main)")
-        
+
         raw_data = st.text_area("Pegar datos de Excel:", height=150, placeholder="Clave\tGpo\tProfesor...\tCalificación")
-        
+
         if st.button("Aplicar Calificaciones Masivas"):
             if not raw_data:
                 st.warning("El cuadro está vacío.")
             else:
                 lines = raw_data.split('\n')
                 count_updates = 0
-                
+
                 califs_dict = {}
                 for line in lines:
                     parts = line.split('\t')
@@ -278,7 +363,7 @@ with st.sidebar:
                         try:
                             nombre_profe = parts[2].replace("(PRESENCIAL)", "").replace("\n", " ").strip()
                             calif_str = parts[-1].strip()
-                            
+
                             valor_float = float(calif_str)
                             califs_dict[nombre_profe] = round(valor_float, 2)
                         except:
@@ -291,7 +376,7 @@ with st.sidebar:
                         for j, grupo in enumerate(materia['grupos']):
                             profe_actual = grupo['profesor']
                             nueva_calif = None
-                            
+
                             if profe_actual in califs_dict:
                                 nueva_calif = califs_dict[profe_actual]
                             else:
@@ -299,11 +384,11 @@ with st.sidebar:
                                     if k_profe in profe_actual or profe_actual in k_profe:
                                         nueva_calif = v_calif
                                         break
-                            
+
                             if nueva_calif is not None:
                                 st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
                                 count_updates += 1
-                                
+
                                 widget_key = f"cal_{i}_{j}"
                                 if widget_key in st.session_state:
                                     st.session_state[widget_key] = nueva_calif
@@ -323,29 +408,29 @@ col_in, col_list = st.columns([1, 1.2])
 with col_in:
     st.subheader("1. Carga de Materias")
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
-    
+
     clave_input = st.text_input(
-        "Ingresa clave por clave o juntas separadas por comas:", 
+        "Ingresa clave por clave o juntas separadas por comas:",
         placeholder="Ejemplo: 1730 ó 1120, 1601, 32"
     )
-    
+
     if st.button("Buscar y Agregar Materias", use_container_width=True):
         lista_claves = [c.strip() for c in clave_input.split(',') if c.strip()]
-        
+
         if not lista_claves:
             st.warning("Por favor ingresa al menos una clave.")
         else:
             agregadas = []
             errores = []
-            
+
             barra = st.progress(0)
-            
+
             for i, clave_raw in enumerate(lista_claves):
                 if clave_raw.isdigit():
                     clave_limpia = str(int(clave_raw))
-                    
+
                     nuevas = obtener_datos_unam(clave_limpia, tipo == "Obligatorio")
-                    
+
                     if nuevas:
                         nombre = nuevas[0]['materia']
                         st.session_state.materias_db.extend(nuevas)
@@ -354,18 +439,15 @@ with col_in:
                         errores.append(f"Clave {clave_limpia}: No encontrada")
                 else:
                     errores.append(f"'{clave_raw}' no es una clave válida")
-                
-                # Actualizar barra
+
                 barra.progress((i + 1) / len(lista_claves))
-            
+
             barra.empty()
-            
-            # --- REPORTE DE RESULTADOS ---
+
             if agregadas:
                 st.success(f"✅ Se agregaron {len(agregadas)} asignaturas correctamente.")
-               
                 st.caption(f"Agregadas: {', '.join([m.split(' - ')[0] for m in agregadas])}")
-            
+
             if errores:
                 for e in errores:
                     st.error(f"❌ {e}")
@@ -377,32 +459,38 @@ with col_in:
         st.info("Bloquea horarios para Trabajo, Comida, Transporte, etc.")
         act_nombre = st.text_input("Nombre de la actividad", "Actividad Personal")
         act_dias = st.multiselect("Días", ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
-        
+
         c_hora1, c_hora2 = st.columns(2)
         t_inicio = c_hora1.time_input("Inicio")
         t_fin = c_hora2.time_input("Fin")
-        
+
         if st.button("Agregar Bloqueo", use_container_width=True):
             if act_nombre and act_dias:
                 str_horario = f"{t_inicio.strftime('%H:%M')} a {t_fin.strftime('%H:%M')}"
                 intervalos_manual = extraer_intervalos(str_horario, act_dias)
-                
+
                 materia_manual = {
                     "materia": act_nombre,
-                    "obligatoria": True, 
+                    "obligatoria": True,
                     "grupos": [{
                         "gpo": "Único",
                         "profesor": "Tú",
                         "horario": str_horario,
                         "dias": ", ".join(act_dias),
                         "intervalos": intervalos_manual,
-                        "calificacion": 10, 
+                        "calificacion": 10,
                         "materia_nombre": act_nombre,
-                        "vacantes": 999, 
-                        "activo": True
+                        "vacantes": 999,
+                        "activo": True,
+
+                        "sugerencia_api": None,
+                        "api_num_resenas": None,
+                        "api_nombre_match": None,
+                        "api_consultado": False,
+
                     }]
                 }
-                
+
                 st.session_state.materias_db.append(materia_manual)
                 st.success(f"Bloqueo '{act_nombre}' agregado.")
             else:
@@ -420,113 +508,174 @@ with col_list:
 
     if not st.session_state.materias_db:
         st.info("Tu lista está vacía. Comienza ingresando una clave a la izquierda.")
-    
+
     for i, m in enumerate(st.session_state.materias_db):
         status = " (Opcional)" if not m['obligatoria'] else ""
-        
+
         with st.expander(f"{m['materia']}{status}", expanded=True):
+
+            # >>> NUEVO: Botón por materia para buscar promedios
+            c_api_1, c_api_2 = st.columns([1, 1])
+            if c_api_1.button("🔍 Buscar promedios (IngenieriaTracker)", key=f"api_mat_{i}", use_container_width=True):
+                grupos_actualizados = 0
+                no_encontrados = 0
+
+                with st.spinner("Consultando promedios de profesores..."):
+                    for j, g in enumerate(m['grupos']):
+                        if g.get("gpo") == "N/A":
+                            continue
+                        if g.get("profesor") == "Tú":
+                            continue
+
+                        nombre_original = g.get("profesor", "")
+                        nombre_limpio = limpiar_nombre_profesor(nombre_original)
+
+                        # Cache para no repetir consultas
+                        if nombre_limpio in st.session_state.api_cache_profes:
+                            resultado = st.session_state.api_cache_profes[nombre_limpio]
+                        else:
+                            resultado = consultar_ingenieria_tracker(nombre_original)
+                            st.session_state.api_cache_profes[nombre_limpio] = resultado
+
+                        # >>> NUEVO: marcar como consultado
+                        st.session_state.materias_db[i]['grupos'][j]['api_consultado'] = True
+
+                        promedio = resultado.get("promedio", None)
+
+                        if promedio is not None:
+                            st.session_state.materias_db[i]['grupos'][j]['sugerencia_api'] = promedio
+                            st.session_state.materias_db[i]['grupos'][j]['api_num_resenas'] = resultado.get("num_resenas", None)
+                            st.session_state.materias_db[i]['grupos'][j]['api_nombre_match'] = resultado.get("nombre_api", None)
+                            grupos_actualizados += 1
+                        else:
+                            st.session_state.materias_db[i]['grupos'][j]['sugerencia_api'] = None
+                            st.session_state.materias_db[i]['grupos'][j]['api_num_resenas'] = None
+                            st.session_state.materias_db[i]['grupos'][j]['api_nombre_match'] = None
+                            no_encontrados += 1
+
+                c_api_2.success(f"✅ API: {grupos_actualizados} encontrados | ❌ {no_encontrados} no encontrados")
+                st.rerun()
+
             if st.button(f"🗑️ Eliminar asignatura", key=f"del_mat_{i}"):
                 st.session_state.materias_db.pop(i)
                 st.rerun()
+
             for j, g in enumerate(m['grupos']):
                 if g['gpo'] == "N/A": continue
-                
+
                 c_check, c_info, c_calif = st.columns([0.15, 0.65, 0.2])
-                
+
                 activo = c_check.checkbox(
                     "Activar",
-                    value=g.get('activo', True), 
+                    value=g.get('activo', True),
                     key=f"chk_{i}_{j}",
                     label_visibility="collapsed"
                 )
                 st.session_state.materias_db[i]['grupos'][j]['activo'] = activo
-                
+
                 vacs = g.get('vacantes', 0)
                 color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
-                
+
+                # >>> NUEVO: sugerencia API visible
+                sug = g.get("sugerencia_api", None)
+                num_res = g.get("api_num_resenas", None)
+                consultado = g.get("api_consultado", False)
+
+                sug_txt = ""  # <- Por defecto no mostramos nada si no se ha consultado
+
+                if consultado:
+                    if sug is not None:
+                        sug_txt = f"⭐ Sugerencia API: <strong>{float(sug):.2f}</strong>"
+                        if num_res is not None:
+                            sug_txt += f" <span style='color:gray'>(reseñas: {num_res})</span>"
+                    else:
+                        sug_txt = "<span style='color:gray;'>⭐ Sugerencia API: No encontrado</span>"
+
                 info_html = f"""
                 <div style="font-size: 0.9em;">
                     <strong>Gpo {g['gpo']}</strong> - {g['profesor']}<br>
                     📅 {g['dias']} ({g['horario']})<br>
-                    Vacantes: <strong style='color: {color_vac}'>{vacs}</strong>
+                    Vacantes: <strong style='color: {color_vac}'>{vacs}</strong><br>
+                    {sug_txt}
                 </div>
                 """
+
                 c_info.markdown(info_html, unsafe_allow_html=True)
-                
+
                 if g['profesor'] != "Tú":
                     key_widget = f"cal_{i}_{j}"
-                    
+
                     if key_widget not in st.session_state:
                         st.session_state[key_widget] = float(g['calificacion'])
-                    
+
                     nueva_calif = c_calif.number_input(
-                        "Calif.", 
+                        "Calif.",
                         min_value=0.0,
                         max_value=10.0,
                         step=0.01,
-                        format="%.2f", 
+                        format="%.2f",
                         key=key_widget,
                         label_visibility="collapsed"
                     )
-                    
+
                     nueva_calif = round(nueva_calif, 2)
-                    
+
                     st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
-                
+
 # --- BOTÓN DE GENERACIÓN ---
 if st.button("Generar combinaciones optimizadas", use_container_width=True):
     if not st.session_state.materias_db:
         st.error("No puedes generar horarios sin materias. Agrega al menos una.")
     else:
         grupos_input = []
-        
+
         for m in st.session_state.materias_db:
             grupos_validos = [g for g in m['grupos'] if g.get('activo', True)]
-            
+
             if grupos_validos:
                 grupos_input.append(grupos_validos)
             else:
                 if m['obligatoria']:
                     st.error(f"Error: Has desactivado todos los grupos de {m['materia']}. Debes dejar al menos uno activo.")
                     st.stop()
-        
+
         total_comb = 1
         for g in grupos_input:
             total_comb *= len(g)
-        
+
         if total_comb > 5_000_000:
             st.warning(f"⚠️ Se detectaron {total_comb:,} combinaciones posibles. Esto podría saturar la memoria. Intenta desactivar algunos grupos o reducir materias.")
-        
+
         generador_comb = itertools.product(*grupos_input)
-        
+
         posibles = []
-        MAX_COMBINACIONES_A_REVISAR = 1000000 
-        
+        MAX_COMBINACIONES_A_REVISAR = 1000000
+
         barra_progreso = st.progress(0)
-        
+
         for idx, comb in enumerate(generador_comb):
             if idx >= MAX_COMBINACIONES_A_REVISAR:
                 st.warning(f"Se revisaron las primeras {MAX_COMBINACIONES_A_REVISAR} combinaciones y se detuvo para no saturar.")
                 break
-                
+
             if es_horario_valido(comb):
                 sc = calcular_score(comb, pesos)
                 posibles.append({"materias": comb, "score": sc})
-            
+
             if idx % 5000 == 0:
                 progreso_val = min(idx / min(total_comb, MAX_COMBINACIONES_A_REVISAR), 1.0)
                 barra_progreso.progress(progreso_val)
-        
+
         barra_progreso.progress(1.0)
-        
+
         posibles = sorted(posibles, key=lambda x: x['score'], reverse=True)[:10]
-        
+
         if posibles:
             st.success("¡Horarios generados con éxito!")
             tabs = st.tabs([f"Opción {i+1}" for i in range(len(posibles))])
-            
+
             colores = [
-                "#FFCDD2", "#C5CAE9", "#B2DFDB", "#FFF9C4", "#E1BEE7", 
+                "#FFCDD2", "#C5CAE9", "#B2DFDB", "#FFF9C4", "#E1BEE7",
                 "#FFCCBC", "#D7CCC8", "#F0F4C3", "#B3E5FC", "#DCEDC8",
                 "#F8BBD0", "#CFD8DC"
             ]
@@ -535,29 +684,29 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                 with tab:
                     opcion = posibles[i]
                     st.write(f"**Puntaje de Excelencia:** {opcion['score']:.2f}")
-                    
+
                     horas_labels = []
                     for h in range(7, 22):
                         horas_labels.append(f"{h:02d}:00")
                         horas_labels.append(f"{h:02d}:30")
-                    
+
                     dias_cols = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]
-                    
+
                     df_text = pd.DataFrame("", index=horas_labels, columns=dias_cols)
                     df_color = pd.DataFrame("", index=horas_labels, columns=dias_cols)
-                    
+
                     materia_color_map = {}
                     color_idx = 0
 
                     for m_g in opcion['materias']:
-                        if m_g['gpo'] == "N/A": continue 
-                        
+                        if m_g['gpo'] == "N/A": continue
+
                         nombre_mat = m_g['materia_nombre']
                         if nombre_mat not in materia_color_map:
                             materia_color_map[nombre_mat] = colores[color_idx % len(colores)]
                             color_idx += 1
                         bg_color = materia_color_map[nombre_mat]
-                        
+
                         if " - " in nombre_mat:
                             partes = nombre_mat.split(' - ')
                             clave = partes[0]
@@ -572,20 +721,20 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
                             h_f = f"{s['fin']//60:02d}:{'30' if (s['fin']%60 >= 30) else '00'}"
-                            
+
                             if h_i in horas_labels and h_f in horas_labels:
                                 start_idx = horas_labels.index(h_i)
                                 end_idx = horas_labels.index(h_f)
                                 duracion_bloques = end_idx - start_idx
-                                
+
                                 for counter, h_idx in enumerate(range(start_idx, end_idx)):
                                     dia = s['dia']
                                     if dia in dias_cols:
                                         estilo = f"background-color: {bg_color}; color: #000000;"
                                         df_color.at[horas_labels[h_idx], dia] = estilo
-                                        
+
                                         texto_celda = ""
-                                        if duracion_bloques == 1: 
+                                        if duracion_bloques == 1:
                                             if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave}) {nombre_limpio}"
                                         elif duracion_bloques == 2:
                                             if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})"
@@ -594,17 +743,17 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                                             if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})"
                                             if counter == 1: texto_celda = f"{nombre_limpio}"
                                             if counter == 2: texto_celda = f"{profesor_corto}"
-                                        
+
                                         df_text.at[horas_labels[h_idx], dia] = texto_celda
 
                     st.dataframe(
                         df_text.style.apply(lambda x: df_color, axis=None),
-                        height=900, 
+                        height=900,
                         use_container_width=True
                     )
         else:
             st.warning("No se encontraron combinaciones válidas. Intenta relajar tus restricciones (ej. permitir huecos o más turnos).")
-        
+
         del posibles
         gc.collect()
 
