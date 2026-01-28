@@ -102,22 +102,31 @@ def refrescar_vacantes():
     n_actualizados = 0
     with st.spinner("Actualizando cupos en tiempo real..."):
         for materia in st.session_state.materias_db:
-            clave = materia['materia'].split(' - ')[0]
+            # Tomamos lo que está antes del " - " (clave si es materia real)
+            clave_raw = str(materia.get("materia", "")).split(" - ")[0].strip()
 
-            datos_nuevos_lista = obtener_datos_unam(clave, materia['obligatoria'])
+            # Si no es numérico, es un bloqueo manual (Trabajo, Actividad Personal, etc.)
+            # y no se puede refrescar desde la UNAM
+            if not clave_raw.isdigit():
+                continue
+
+            datos_nuevos_lista = obtener_datos_unam(clave_raw, materia.get("obligatoria", False))
 
             if datos_nuevos_lista:
                 datos_nuevos = datos_nuevos_lista[0]
 
-                for g_viejo in materia['grupos']:
-                    if g_viejo['gpo'] == 'N/A': continue
+                for g_viejo in materia["grupos"]:
+                    if g_viejo.get("gpo") == "N/A":
+                        continue
 
-                    for g_nuevo in datos_nuevos['grupos']:
-                        if g_nuevo['gpo'] == g_viejo['gpo']:
-                            g_viejo['vacantes'] = g_nuevo['vacantes']
+                    for g_nuevo in datos_nuevos["grupos"]:
+                        if g_nuevo.get("gpo") == g_viejo.get("gpo"):
+                            g_viejo["vacantes"] = g_nuevo.get("vacantes", g_viejo.get("vacantes", 0))
                             n_actualizados += 1
                             break
+
     st.success(f"Se actualizaron {n_actualizados} grupos.")
+
 
 # --- CARGA DE CATÁLOGO DE MATERIAS ---
 @st.cache_data
@@ -145,7 +154,11 @@ CATALOGO_MATERIAS = cargar_nombres_materias()
 # --- LÓGICA DEL PARSER ---
 def obtener_datos_unam(clave_materia, es_obligatoria):
     clave_materia = str(clave_materia)
-    clave_int = str(int(clave_materia))
+    try:
+        clave_int = str(int(clave_materia))
+    except:
+        return []
+
 
     nombre_limpio = CATALOGO_MATERIAS.get(clave_int, "MATERIA DESCONOCIDA")
     nombre_materia = f"{clave_int} - {nombre_limpio}"
