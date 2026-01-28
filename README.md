@@ -1,6 +1,6 @@
 #  Generador de Horarios FI - UNAM (Automatizado)
 
-¡Olvídate de armar horarios a mano! Esta herramienta descarga automáticamente la información oficial de la Facultad de Ingeniería, verifica los cupos en tiempo real y utiliza un algoritmo para generarte las 10 mejores combinaciones posibles sin traslapes.
+Esta herramienta descarga automáticamente la información oficial de la Facultad de Ingeniería, verifica los cupos en tiempo real y utiliza un algoritmo para generarte las 10 mejores combinaciones posibles sin traslapes.
 
 Tú decides qué es importante: ¿Buenos profesores? ¿Salir temprano? ¿Evitar huecos? La app hace el resto.
 
