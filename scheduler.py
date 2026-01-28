@@ -28,22 +28,17 @@ def extraer_intervalos(horario_str, dias_lista):
 def refrescar_vacantes():
     n_actualizados = 0
     with st.spinner("Actualizando cupos en tiempo real..."):
-        # Iteramos sobre las materias registradas
         for materia in st.session_state.materias_db:
-            # Extraemos la clave del nombre "1601 - SUELOS" -> "1601"
             clave = materia['materia'].split(' - ')[0]
             
-            # Descargamos datos frescos
             datos_nuevos_lista = obtener_datos_unam(clave, materia['obligatoria'])
             
             if datos_nuevos_lista:
-                datos_nuevos = datos_nuevos_lista[0] # Tomamos la materia
+                datos_nuevos = datos_nuevos_lista[0]
                 
-                # Actualizamos grupo por grupo
                 for g_viejo in materia['grupos']:
-                    if g_viejo['gpo'] == 'N/A': continue # Ignoramos el grupo vacío
+                    if g_viejo['gpo'] == 'N/A': continue 
                     
-                    # Buscamos este grupo en los datos nuevos
                     for g_nuevo in datos_nuevos['grupos']:
                         if g_nuevo['gpo'] == g_viejo['gpo']:
                             g_viejo['vacantes'] = g_nuevo['vacantes']
@@ -75,13 +70,11 @@ CATALOGO_MATERIAS = cargar_nombres_materias()
 # --- LÓGICA DEL PARSER ---
 def obtener_datos_unam(clave_materia, es_obligatoria):
     clave_materia = str(clave_materia)
-    # Limpiamos ceros a la izquierda para buscar en el catálogo
     clave_int = str(int(clave_materia)) 
     
     nombre_limpio = CATALOGO_MATERIAS.get(clave_int, "MATERIA DESCONOCIDA")
     nombre_materia = f"{clave_int} - {nombre_limpio}"
     
-    # URL usa la clave tal cual la ingresó el usuario o limpia (usualmente limpia)
     url = f"https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/{clave_int}.html"
     
     try:
@@ -90,7 +83,6 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # BUSCAMOS TODAS LAS TABLAS (Con y Sin vacantes)
         tablas = soup.find_all('table')
         if not tablas: return []
         
@@ -109,12 +101,10 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                 if len(datos) < 7: continue
                 if datos[0] == "Clave": continue 
                 
-                # Extracción
                 gpo = datos[1]
                 profesor = datos[2].replace("(PRESENCIAL)", "").replace("\n", " ").strip()
                 horario = datos[4]
                 dias_str = datos[5]
-                # La columna vacantes es la última (índice 7 u -1)
                 try:
                     vacantes = int(datos[-1])
                 except:
@@ -130,8 +120,8 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                     "intervalos": intervalos,
                     "calificacion": 10,
                     "materia_nombre": nombre_materia,
-                    "vacantes": vacantes,        # <--- NUEVO CAMPO
-                    "activo": vacantes > 0       # <--- Por defecto: activo si hay lugar
+                    "vacantes": vacantes,      
+                    "activo": vacantes > 0      
                 })
             
         if not datos_materia["grupos"]: return []
@@ -163,20 +153,16 @@ def calcular_score(combinacion, pesos):
     
     score = 0
     
-    # 1. HUECOS
     huecos = 0
-    # Incluye "Sab" en la lista de días
     for dia in ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]:
         clases = sorted([s for g in grupos_reales for s in g['intervalos'] if s['dia'] == dia], key=lambda x: x['inicio'])
         for i in range(len(clases)-1):
             huecos += (clases[i+1]['inicio'] - clases[i]['fin']) / 60
     score -= huecos * pesos['huecos']
     
-    # 2. PROFESORES
     promedio_p = sum(g['calificacion'] for g in grupos_reales) / len(grupos_reales)
     score += promedio_p * pesos['profes']
     
-    # 3. TURNO (MAÑANA / TARDE / MIXTO)
     start_times = [s['inicio'] for g in grupos_reales for s in g['intervalos']]
     end_times = [s['fin'] for g in grupos_reales for s in g['intervalos']]
     
@@ -188,10 +174,9 @@ def calcular_score(combinacion, pesos):
             score += ((1440 - ultima_salida) / 60) * pesos['peso_turno']
         elif pesos['tipo_turno'] == "Tarde / Noche":
             score += (primer_inicio / 60) * pesos['peso_turno']
-        else: # Mixto
+        else:
             pass
 
-    # 4. CARGA ACADÉMICA
     score += len(grupos_reales) * pesos['carga']
     
     return score
@@ -262,6 +247,66 @@ with st.sidebar:
         "peso_turno": w_turno, 
         "carga": w_carga
     }
+    
+    st.markdown("---")
+    
+    # --- CARGA MASIVA DE CALIFICACIONES ---
+    with st.expander(" Carga Masiva de Calificaciones desde Excel `experimental`", expanded=False):
+        st.info("Pega aquí tus celdas de Excel. El sistema buscará el nombre del profesor y actualizará su nota.")
+        
+        st.markdown("ℹ **Para más información y ejemplos:** [Ver guía en GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main)")
+        
+        raw_data = st.text_area("Pegar datos de Excel:", height=150, placeholder="Clave\tGpo\tProfesor...\tCalificación")
+        
+        if st.button("Aplicar Calificaciones Masivas"):
+            if not raw_data:
+                st.warning("El cuadro está vacío.")
+            else:
+                lines = raw_data.split('\n')
+                count_updates = 0
+                
+                califs_dict = {}
+                for line in lines:
+                    parts = line.split('\t')
+                    if len(parts) >= 3:
+                        try:
+                            nombre_profe = parts[2].replace("(PRESENCIAL)", "").replace("\n", " ").strip()
+                            calif_str = parts[-1].strip()
+                            
+                            valor_float = float(calif_str)
+                            califs_dict[nombre_profe] = round(valor_float, 2)
+                        except:
+                            continue
+
+                if not califs_dict:
+                    st.error("No se detectó el formato correcto (Tabulaciones de Excel).")
+                else:
+                    for i, materia in enumerate(st.session_state.materias_db):
+                        for j, grupo in enumerate(materia['grupos']):
+                            profe_actual = grupo['profesor']
+                            nueva_calif = None
+                            
+                            if profe_actual in califs_dict:
+                                nueva_calif = califs_dict[profe_actual]
+                            else:
+                                for k_profe, v_calif in califs_dict.items():
+                                    if k_profe in profe_actual or profe_actual in k_profe:
+                                        nueva_calif = v_calif
+                                        break
+                            
+                            if nueva_calif is not None:
+                                st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
+                                count_updates += 1
+                                
+                                widget_key = f"cal_{i}_{j}"
+                                if widget_key in st.session_state:
+                                    st.session_state[widget_key] = nueva_calif
+
+                    if count_updates > 0:
+                        st.success(f"✅ ¡Se actualizaron {count_updates} profesores!")
+                        st.rerun()
+                    else:
+                        st.warning("No encontré coincidencias de nombres.")
 
 # --- COLUMNAS PRINCIPALES ---
 col_in, col_list = st.columns([1, 1.2])
@@ -354,7 +399,6 @@ with col_in:
                 
                 st.session_state.materias_db.append(materia_manual)
                 st.success(f"Bloqueo '{act_nombre}' agregado.")
-                # Aquí sí usamos rerun para limpiar el form visualmente si quieres
             else:
                 st.error("Debes poner un nombre y seleccionar al menos un día.")
 
@@ -374,7 +418,6 @@ with col_list:
     for i, m in enumerate(st.session_state.materias_db):
         status = " (Opcional)" if not m['obligatoria'] else ""
         
-        # Expandimos por defecto para ver los grupos rápido
         with st.expander(f"{m['materia']}{status}", expanded=True):
             if st.button(f"🗑️ Eliminar asignatura", key=f"del_mat_{i}"):
                 st.session_state.materias_db.pop(i)
@@ -382,13 +425,11 @@ with col_list:
             for j, g in enumerate(m['grupos']):
                 if g['gpo'] == "N/A": continue
                 
-                # Checkbox | Info | Calif
                 c_check, c_info, c_calif = st.columns([0.15, 0.65, 0.2])
                 
                 activo = c_check.checkbox("", value=g.get('activo', True), key=f"chk_{i}_{j}")
                 st.session_state.materias_db[i]['grupos'][j]['activo'] = activo
                 
-                # Color de vacantes
                 vacs = g.get('vacantes', 0)
                 color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
                 
@@ -402,34 +443,42 @@ with col_list:
                 c_info.markdown(info_html, unsafe_allow_html=True)
                 
                 if g['profesor'] != "Tú":
+                    key_widget = f"cal_{i}_{j}"
+                    
+                    if key_widget not in st.session_state:
+                        st.session_state[key_widget] = float(g['calificacion'])
+                    
                     nueva_calif = c_calif.number_input(
-                        "Calif.", 0, 10, g['calificacion'], 
-                        key=f"cal_{i}_{j}", label_visibility="collapsed"
+                        "Calif.", 
+                        min_value=0.0,
+                        max_value=10.0,
+                        step=0.01,
+                        format="%.2f", 
+                        key=key_widget,
+                        label_visibility="collapsed"
                     )
+                    
+                    nueva_calif = round(nueva_calif, 2)
+                    
                     st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
-                
                 
 # --- BOTÓN DE GENERACIÓN ---
 if st.button("Generar combinaciones optimizadas", use_container_width=True):
     if not st.session_state.materias_db:
         st.error("No puedes generar horarios sin materias. Agrega al menos una.")
     else:
-        # 1. Inicializamos la lista DENTRO del else
         grupos_input = []
         
-        # 2. El ciclo for debe estar INDENTADO (dentro del else)
         for m in st.session_state.materias_db:
             grupos_validos = [g for g in m['grupos'] if g.get('activo', True)]
             
             if grupos_validos:
                 grupos_input.append(grupos_validos)
             else:
-                # Si una obligatoria no tiene grupos activos, detenemos todo
                 if m['obligatoria']:
                     st.error(f"Error: Has desactivado todos los grupos de {m['materia']}. Debes dejar al menos uno activo.")
                     st.stop()
         
-        # 3. Todo el resto de la lógica también va dentro del else
         posibles = []
         todas_comb = list(itertools.product(*grupos_input))
         progreso = st.progress(0)
@@ -439,11 +488,9 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                 sc = calcular_score(comb, pesos)
                 posibles.append({"materias": comb, "score": sc})
             
-            # Actualizamos barra de progreso cada 100 iteraciones
             if idx % 100 == 0:
                 progreso.progress((idx + 1) / len(todas_comb))
         
-        # Aseguramos que la barra llegue al 100%
         progreso.progress(1.0)
         
         posibles = sorted(posibles, key=lambda x: x['score'], reverse=True)[:10]
@@ -486,7 +533,7 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                             color_idx += 1
                         bg_color = materia_color_map[nombre_mat]
                         
-                        # Parseo seguro del nombre para evitar errores si el formato varía
+                    
                         if " - " in nombre_mat:
                             partes = nombre_mat.split(' - ')
                             clave = partes[0]
