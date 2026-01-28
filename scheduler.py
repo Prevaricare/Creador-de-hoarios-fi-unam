@@ -5,6 +5,7 @@ import itertools
 import requests
 from bs4 import BeautifulSoup
 import gc
+import heapq
 
 # >>> NUEVO
 import urllib.parse
@@ -679,23 +680,40 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
             total_comb *= len(g)
 
         if total_comb > 5_000_000:
-            st.warning(f"⚠️ Se detectaron {total_comb:,} combinaciones posibles. Esto podría saturar la memoria. Intenta desactivar algunos grupos o reducir materias.")
+            st.warning(
+                f"⚠️ Se detectaron {total_comb:,} combinaciones posibles. "
+                "Esto podría saturar la memoria. Intenta desactivar algunos grupos o reducir materias."
+            )
 
         generador_comb = itertools.product(*grupos_input)
 
-        posibles = []
-        MAX_COMBINACIONES_A_REVISAR = 1000000
+        # ==========================================================
+        # TOP-10 incremental (NO guarda todas las combinaciones)
+        # ==========================================================
+        TOP_K = 10
+        top_heap = []  # min-heap: (score, idx, comb)
 
+        MAX_COMBINACIONES_A_REVISAR = 1000000
         barra_progreso = st.progress(0)
 
         for idx, comb in enumerate(generador_comb):
             if idx >= MAX_COMBINACIONES_A_REVISAR:
-                st.warning(f"Se revisaron las primeras {MAX_COMBINACIONES_A_REVISAR} combinaciones y se detuvo para no saturar.")
+                st.warning(
+                    f"Se revisaron las primeras {MAX_COMBINACIONES_A_REVISAR} combinaciones "
+                    "y se detuvo para no saturar."
+                )
                 break
 
             if es_horario_valido(comb):
                 sc = calcular_score(comb, pesos)
-                posibles.append({"materias": comb, "score": sc})
+
+                # Guardar solo las mejores TOP_K
+                if len(top_heap) < TOP_K:
+                    heapq.heappush(top_heap, (sc, idx, comb))
+                else:
+                    # Si esta combinación es mejor que la peor del heap, reemplazar
+                    if sc > top_heap[0][0]:
+                        heapq.heapreplace(top_heap, (sc, idx, comb))
 
             if idx % 5000 == 0:
                 progreso_val = min(idx / min(total_comb, MAX_COMBINACIONES_A_REVISAR), 1.0)
@@ -703,8 +721,15 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
 
         barra_progreso.progress(1.0)
 
-        posibles = sorted(posibles, key=lambda x: x['score'], reverse=True)[:10]
+        # Ordenar de mayor a menor score
+        top_heap_sorted = sorted(top_heap, key=lambda x: x[0], reverse=True)
 
+        # Convertir al formato original
+        posibles = [{"materias": comb, "score": sc} for (sc, _, comb) in top_heap_sorted]
+
+        # ==========================================================
+        # Mostrar resultados
+        # ==========================================================
         if posibles:
             st.success("¡Horarios generados con éxito!")
             tabs = st.tabs([f"Opción {i+1}" for i in range(len(posibles))])
@@ -734,7 +759,8 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     color_idx = 0
 
                     for m_g in opcion['materias']:
-                        if m_g['gpo'] == "N/A": continue
+                        if m_g['gpo'] == "N/A":
+                            continue
 
                         nombre_mat = m_g['materia_nombre']
                         if nombre_mat not in materia_color_map:
@@ -770,14 +796,20 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
 
                                         texto_celda = ""
                                         if duracion_bloques == 1:
-                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave}) {nombre_limpio}"
+                                            if counter == 0:
+                                                texto_celda = f"GPO {m_g['gpo']} ({clave}) {nombre_limpio}"
                                         elif duracion_bloques == 2:
-                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})"
-                                            if counter == 1: texto_celda = f"{nombre_limpio}"
+                                            if counter == 0:
+                                                texto_celda = f"GPO {m_g['gpo']} ({clave})"
+                                            if counter == 1:
+                                                texto_celda = f"{nombre_limpio}"
                                         elif duracion_bloques >= 3:
-                                            if counter == 0: texto_celda = f"GPO {m_g['gpo']} ({clave})"
-                                            if counter == 1: texto_celda = f"{nombre_limpio}"
-                                            if counter == 2: texto_celda = f"{profesor_corto}"
+                                            if counter == 0:
+                                                texto_celda = f"GPO {m_g['gpo']} ({clave})"
+                                            if counter == 1:
+                                                texto_celda = f"{nombre_limpio}"
+                                            if counter == 2:
+                                                texto_celda = f"{profesor_corto}"
 
                                         df_text.at[horas_labels[h_idx], dia] = texto_celda
 
@@ -787,9 +819,15 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                         use_container_width=True
                     )
         else:
-            st.warning("No se encontraron combinaciones válidas. Intenta relajar tus restricciones (ej. permitir huecos o más turnos).")
+            st.warning(
+                "No se encontraron combinaciones válidas. "
+                "Intenta relajar tus restricciones (ej. permitir huecos o más turnos)."
+            )
 
+        # Limpieza
         del posibles
+        del top_heap
+        del top_heap_sorted
         gc.collect()
 
 # --- PIE DE PÁGINA ---
