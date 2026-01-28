@@ -212,7 +212,7 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     Si no sabes la clave de tu materia (ej. 1120, 1601), consúltala en los [Mapas Curriculares Oficiales](http://escolar.ingenieria.unam.mx/mapas/).
 
     **2. Ingresa y Agrega:**
-    Escribe la clave numérica en el menú de la izquierda (ej. `1120`) y presiona **Buscar y Agregar Materia**.
+    Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej.`1730` ó `1120, 1601, 32`) y presiona **Buscar y Agregar Materias**.
 
     **3. Filtra Grupos:**
     En la lista de la derecha, verás los grupos con sus vacantes en tiempo real.
@@ -271,30 +271,57 @@ col_in, col_list = st.columns([1, 1.2])
 # ==========================================
 with col_in:
     st.subheader("1. Carga de Materias")
-    
-    # --- BUSCADOR DE MATERIAS UNAM ---
     tipo = st.radio("Categoría:", ["Obligatorio", "Opcional"], horizontal=True)
     
-    clave_input = st.text_input("Ingresa la Clave de la Asignatura (Ej. 1120 o 152):", max_chars=4)
+    clave_input = st.text_input(
+        "Ingresa clave por clave o juntas separadas por comas:", 
+        placeholder="Ejemplo: 1730 ó 1120, 1601, 32"
+    )
     
-    if st.button("Buscar y Agregar Materia", use_container_width=True):
-        if clave_input.isdigit() and 1 <= len(clave_input) <= 4:
-            clave_limpia = str(int(clave_input))
-            
-            with st.spinner(f'Buscando clave {clave_limpia}...'):
-                nuevas = obtener_datos_unam(clave_limpia, tipo == "Obligatorio")
-                
-                if nuevas:
-                    nombre = nuevas[0]['materia']
-                    st.session_state.materias_db.extend(nuevas)
-                    st.success(f"¡Éxito! Se agregó: {nombre}")
-                    st.rerun()
-                else:
-                    st.error(f"No se encontró la materia {clave_limpia}. Verifica que la clave exista.")
+    if st.button("Buscar y Agregar Materias", use_container_width=True):
+        lista_claves = [c.strip() for c in clave_input.split(',') if c.strip()]
+        
+        if not lista_claves:
+            st.warning("Por favor ingresa al menos una clave.")
         else:
-            st.warning("Por favor ingresa una clave numérica válida.")
+            agregadas = []
+            errores = []
+            
+            barra = st.progress(0)
+            
+            for i, clave_raw in enumerate(lista_claves):
+                if clave_raw.isdigit():
+                    clave_limpia = str(int(clave_raw))
+                    
+                    nuevas = obtener_datos_unam(clave_limpia, tipo == "Obligatorio")
+                    
+                    if nuevas:
+                        nombre = nuevas[0]['materia']
+                        st.session_state.materias_db.extend(nuevas)
+                        agregadas.append(nombre)
+                    else:
+                        errores.append(f"Clave {clave_limpia}: No encontrada")
+                else:
+                    errores.append(f"'{clave_raw}' no es una clave válida")
+                
+                # Actualizar barra
+                barra.progress((i + 1) / len(lista_claves))
+            
+            barra.empty()
+            
+            # --- REPORTE DE RESULTADOS ---
+            if agregadas:
+                st.success(f"✅ Se agregaron {len(agregadas)} asignaturas correctamente.")
+               
+                st.caption(f"Agregadas: {', '.join([m.split(' - ')[0] for m in agregadas])}")
+            
+            if errores:
+                for e in errores:
+                    st.error(f"❌ {e}")
 
-    # --- AGREGAR ACTIVIDAD MANUAL / BLOQUEO (MOVIDO AQUÍ) ---
+    st.markdown("---")
+
+    # --- AGREGAR ACTIVIDAD MANUAL / BLOQUEO ---
     with st.expander("Agregar Actividad Manual / Bloqueo", expanded=False):
         st.info("Bloquea horarios para Trabajo, Comida, Transporte, etc.")
         act_nombre = st.text_input("Nombre de la actividad", "Actividad Personal")
@@ -320,17 +347,16 @@ with col_in:
                         "intervalos": intervalos_manual,
                         "calificacion": 10, 
                         "materia_nombre": act_nombre,
-                        "vacantes": 999, # Siempre hay cupo para ti
+                        "vacantes": 999, 
                         "activo": True
                     }]
                 }
                 
                 st.session_state.materias_db.append(materia_manual)
                 st.success(f"Bloqueo '{act_nombre}' agregado.")
-                st.rerun()
+                # Aquí sí usamos rerun para limpiar el form visualmente si quieres
             else:
                 st.error("Debes poner un nombre y seleccionar al menos un día.")
-
 
 # ==========================================
 # COLUMNA DERECHA: LISTA Y GESTIÓN
