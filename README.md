@@ -1,15 +1,15 @@
-# 📅 Generador de Horarios FI - UNAM (Automatizado)
+#  Generador de Horarios FI - UNAM (Automatizado)
 
 ¡Olvídate de armar horarios a mano! Esta herramienta descarga automáticamente la información oficial de la Facultad de Ingeniería, verifica los cupos en tiempo real y utiliza un algoritmo para generarte las 10 mejores combinaciones posibles sin traslapes.
 
 Tú decides qué es importante: ¿Buenos profesores? ¿Salir temprano? ¿Evitar huecos? La app hace el resto.
 
-## 🚀 Prueba la App en vivo
-👉 **[Click aquí para usar el Generador](https://horarios-fi-unam.streamlit.app/)**
+##  Prueba la App en vivo
+ **[Click aquí para usar el Generador](https://horarios-fi-unam.streamlit.app/)**
 
 ---
 
-## ✨ Características Nuevas
+##  Características Nuevas
 * **Conexión Directa:** Ya no necesitas copiar y pegar texto. Solo ingresa la clave de la materia.
 * **Cupos en Tiempo Real:** Visualiza cuántas vacantes quedan y filtra los grupos llenos.
 * **Bloqueos Personales:** ¿Trabajas o entrenas? Bloquea esos horarios para que no se toquen.
@@ -17,7 +17,7 @@ Tú decides qué es importante: ¿Buenos profesores? ¿Salir temprano? ¿Evitar 
 
 ---
 
-## 📖 Guía de Uso Detallada
+##  Guía de Uso Detallada
 
 ### 1. Configuración de Prioridades (Pesos)
 En el menú lateral izquierdo, define qué es lo más importante para ti.
@@ -76,7 +76,7 @@ Explora las pestañas (Opción 1, Opción 2...) para ver las diferentes propuest
 
 ---
 
-## 🛠️ Instalación Local (Para Desarrolladores)
+##  Instalación Local (Para Desarrolladores)
 
 Si quieres correr esto en tu propia computadora:
 
