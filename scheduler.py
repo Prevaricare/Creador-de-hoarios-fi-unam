@@ -4,6 +4,7 @@ import re
 import itertools
 import requests
 from bs4 import BeautifulSoup
+import gc
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Generador de Horarios", layout="wide")
@@ -46,14 +47,13 @@ def refrescar_vacantes():
                             break
     st.success(f"Se actualizaron {n_actualizados} grupos.")
 
-# --- CARGA DE CATÁLOGO DE MATERIAS (NUEVO) ---
+# --- CARGA DE CATÁLOGO DE MATERIAS ---
 @st.cache_data 
 def cargar_nombres_materias():
     url = "https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/listaAsignatura.js"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=5)
         if response.status_code == 200:
-
             patron = r"asignatura\['(\d+)'\]\s*=\s*'([^']+)';"
             coincidencias = re.findall(patron, response.text)
             
@@ -61,6 +61,9 @@ def cargar_nombres_materias():
             return diccionario_nombres
         else:
             return {}
+    except requests.exceptions.Timeout:
+        st.error("El servidor de la UNAM tardó demasiado en responder al cargar el catálogo.")
+        return {}
     except Exception as e:
         st.error(f"No se pudo cargar el catálogo de materias: {e}")
         return {}
@@ -78,7 +81,7 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
     url = f"https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/{clave_int}.html"
     
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=5)
         if response.status_code != 200: return None 
             
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -120,17 +123,20 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                     "intervalos": intervalos,
                     "calificacion": 10,
                     "materia_nombre": nombre_materia,
-                    "vacantes": vacantes,      
-                    "activo": vacantes > 0      
+                    "vacantes": vacantes,
+                    "activo": vacantes > 0
                 })
             
         if not datos_materia["grupos"]: return []
         return [datos_materia]
 
+    except requests.exceptions.Timeout:
+        st.error(f"Tiempo de espera agotado al buscar la clave {clave_int}. Intenta de nuevo.")
+        return []
     except Exception as e:
         st.error(f"Error técnico: {e}")
         return []
-
+        
 # --- LÓGICA DE VALIDACIÓN Y SCORE ---
 def hay_traslape(g1, g2):
     for s1 in g1['intervalos']:
@@ -427,7 +433,12 @@ with col_list:
                 
                 c_check, c_info, c_calif = st.columns([0.15, 0.65, 0.2])
                 
-                activo = c_check.checkbox("", value=g.get('activo', True), key=f"chk_{i}_{j}")
+                activo = c_check.checkbox(
+                    "Activar",
+                    value=g.get('activo', True), 
+                    key=f"chk_{i}_{j}",
+                    label_visibility="collapsed"
+                )
                 st.session_state.materias_db[i]['grupos'][j]['activo'] = activo
                 
                 vacs = g.get('vacantes', 0)
@@ -479,24 +490,38 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     st.error(f"Error: Has desactivado todos los grupos de {m['materia']}. Debes dejar al menos uno activo.")
                     st.stop()
         
-        posibles = []
-        todas_comb = list(itertools.product(*grupos_input))
-        progreso = st.progress(0)
+        total_comb = 1
+        for g in grupos_input:
+            total_comb *= len(g)
         
-        for idx, comb in enumerate(todas_comb):
+        if total_comb > 5_000_000:
+            st.warning(f"⚠️ Se detectaron {total_comb:,} combinaciones posibles. Esto podría saturar la memoria. Intenta desactivar algunos grupos o reducir materias.")
+        
+        generador_comb = itertools.product(*grupos_input)
+        
+        posibles = []
+        MAX_COMBINACIONES_A_REVISAR = 1000000 
+        
+        barra_progreso = st.progress(0)
+        
+        for idx, comb in enumerate(generador_comb):
+            if idx >= MAX_COMBINACIONES_A_REVISAR:
+                st.warning(f"Se revisaron las primeras {MAX_COMBINACIONES_A_REVISAR} combinaciones y se detuvo para no saturar.")
+                break
+                
             if es_horario_valido(comb):
                 sc = calcular_score(comb, pesos)
                 posibles.append({"materias": comb, "score": sc})
             
-            if idx % 100 == 0:
-                progreso.progress((idx + 1) / len(todas_comb))
+            if idx % 5000 == 0:
+                progreso_val = min(idx / min(total_comb, MAX_COMBINACIONES_A_REVISAR), 1.0)
+                barra_progreso.progress(progreso_val)
         
-        progreso.progress(1.0)
+        barra_progreso.progress(1.0)
         
         posibles = sorted(posibles, key=lambda x: x['score'], reverse=True)[:10]
         
         if posibles:
-            # --- SECCIÓN DE RESULTADOS ---
             st.success("¡Horarios generados con éxito!")
             tabs = st.tabs([f"Opción {i+1}" for i in range(len(posibles))])
             
@@ -533,7 +558,6 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                             color_idx += 1
                         bg_color = materia_color_map[nombre_mat]
                         
-                    
                         if " - " in nombre_mat:
                             partes = nombre_mat.split(' - ')
                             clave = partes[0]
@@ -580,6 +604,9 @@ if st.button("Generar combinaciones optimizadas", use_container_width=True):
                     )
         else:
             st.warning("No se encontraron combinaciones válidas. Intenta relajar tus restricciones (ej. permitir huecos o más turnos).")
+        
+        del posibles
+        gc.collect()
 
 # --- PIE DE PÁGINA ---
 st.markdown("---")
