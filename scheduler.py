@@ -6,6 +6,10 @@ import requests
 from bs4 import BeautifulSoup
 import gc
 import heapq
+from datetime import datetime, timedelta
+import io
+import matplotlib.pyplot as plt
+
 
 # >>> NUEVO
 import urllib.parse
@@ -102,11 +106,15 @@ def refrescar_vacantes():
     n_actualizados = 0
     with st.spinner("Actualizando cupos en tiempo real..."):
         for materia in st.session_state.materias_db:
+
+            # >>> NUEVO: ignorar bloqueos manuales de forma segura
+            if materia.get("es_bloqueo", False):
+                continue
+
             # Tomamos lo que está antes del " - " (clave si es materia real)
             clave_raw = str(materia.get("materia", "")).split(" - ")[0].strip()
 
-            # Si no es numérico, es un bloqueo manual (Trabajo, Actividad Personal, etc.)
-            # y no se puede refrescar desde la UNAM
+            # Si no es numérico, no se puede refrescar desde la UNAM
             if not clave_raw.isdigit():
                 continue
 
@@ -204,7 +212,7 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
 
                 # Opcional: quitar prefijos comunes (para API)
                 profesor_limpio = re.sub(
-                    r"^(ING\.|DR\.|DRA\.|M\.I\.|M\. EN I\.|MTRO\.|MTRA\.|LIC\.|ARQ\.)\s+",
+                    r"^(ING\.|DR\.|DRA\.|M\.I\.|M\. EN I\.|MC\.|MTRO\.|MTRA\.|LIC\.|ARQ\.)\s+",
                     "",
                     profesor_limpio,
                     flags=re.IGNORECASE
@@ -300,6 +308,114 @@ def calcular_score(combinacion, pesos):
     score += len(grupos_reales) * pesos['carga']
 
     return score
+
+# EXPORTACIÓN A CALENDARIO (.ics)
+def _proxima_fecha_para_dia(dia_str):
+    """
+    Regresa una fecha (datetime.date) para el próximo día de la semana indicado.
+    No importa el semestre real: solo sirve como plantilla para el calendario.
+    """
+    mapa = {"Lun": 0, "Mar": 1, "Mie": 2, "Jue": 3, "Vie": 4, "Sab": 5}
+    if dia_str not in mapa:
+        return datetime.today().date()
+
+    hoy = datetime.today().date()
+    delta = (mapa[dia_str] - hoy.weekday()) % 7
+    if delta == 0:
+        delta = 7 
+    return hoy + timedelta(days=delta)
+
+def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI UNAM"):
+    """
+    Convierte una combinación (lista de grupos) en texto ICS.
+    """
+    # Cabecera básica ICS
+    ics = []
+    ics.append("BEGIN:VCALENDAR")
+    ics.append("VERSION:2.0")
+    ics.append("PRODID:-//FI UNAM Scheduler//Streamlit//ES")
+    ics.append("CALSCALE:GREGORIAN")
+    ics.append(f"X-WR-CALNAME:{nombre_calendario}")
+
+    # Creamos eventos
+    for g in materias_combinadas:
+        if g.get("gpo") == "N/A":
+            continue
+
+        materia_nombre = g.get("materia_nombre", "Materia")
+        profesor = g.get("profesor", "")
+        modalidad = g.get("modalidad", "")
+        horario = g.get("horario", "")
+        dias = g.get("dias", "")
+        vacantes = g.get("vacantes", "")
+
+        # Título del evento
+        summary = f"{materia_nombre} | GPO {g.get('gpo','')}"
+
+        # Descripción
+        desc = f"Profesor: {profesor}"
+        if modalidad:
+            desc += f" ({modalidad})"
+        desc += f"\\nHorario: {dias} {horario}"
+        desc += f"\\nVacantes: {vacantes}"
+
+        # Cada intervalo es un evento (por día)
+        for s in g.get("intervalos", []):
+            dia = s.get("dia")
+            fecha = _proxima_fecha_para_dia(dia)
+
+            inicio_min = s.get("inicio", 0)
+            fin_min = s.get("fin", 0)
+
+            dtstart = datetime.combine(fecha, datetime.min.time()) + timedelta(minutes=inicio_min)
+            dtend = datetime.combine(fecha, datetime.min.time()) + timedelta(minutes=fin_min)
+
+            # Formato ICS: YYYYMMDDTHHMMSS
+            dtstart_str = dtstart.strftime("%Y%m%dT%H%M%S")
+            dtend_str = dtend.strftime("%Y%m%dT%H%M%S")
+
+            uid = f"{materia_nombre}-{g.get('gpo','')}-{dia}-{dtstart_str}@fiunam"
+
+            ics.append("BEGIN:VEVENT")
+            ics.append(f"UID:{uid}")
+            ics.append(f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}")
+            ics.append(f"DTSTART:{dtstart_str}")
+            ics.append(f"DTEND:{dtend_str}")
+            ics.append(f"SUMMARY:{summary}")
+            ics.append(f"DESCRIPTION:{desc}")
+            ics.append("END:VEVENT")
+
+    ics.append("END:VCALENDAR")
+    return "\n".join(ics)
+
+# EXPORTACIÓN COMO IMAGEN (PNG)
+
+def dataframe_a_png(df_text):
+    """
+    Renderiza un DataFrame como imagen PNG con matplotlib.
+    Devuelve bytes PNG.
+    """
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.axis("off")
+
+    tabla = ax.table(
+        cellText=df_text.values,
+        colLabels=df_text.columns,
+        rowLabels=df_text.index,
+        loc="center",
+        cellLoc="center"
+    )
+
+    tabla.auto_set_font_size(False)
+    tabla.set_fontsize(8)
+    tabla.scale(1.0, 1.2)
+
+    buf = io.BytesIO()
+    plt.tight_layout()
+    fig.savefig(buf, format="png", dpi=200)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
 
 # --- INTERFAZ DE USUARIO ---
 st.title("Generador de Horarios")
@@ -492,8 +608,6 @@ with col_in:
                 for e in errores:
                     st.error(f"❌ {e}")
 
-    st.markdown("---")
-
     # --- AGREGAR ACTIVIDAD MANUAL / BLOQUEO ---
     with st.expander("Agregar Actividad Manual / Bloqueo", expanded=False):
         st.info("Bloquea horarios para Trabajo, Comida, Transporte, etc.")
@@ -512,6 +626,10 @@ with col_in:
                 materia_manual = {
                     "materia": act_nombre,
                     "obligatoria": True,
+
+                    # >>> NUEVO: identificador robusto para que NO se trate como materia UNAM
+                    "es_bloqueo": True,
+
                     "grupos": [{
                         "gpo": "Único",
                         "profesor": "Tú",
@@ -528,8 +646,12 @@ with col_in:
                         "api_nombre_match": None,
                         "api_consultado": False,
 
+                        # >>> NUEVO: para consistencia con el resto
+                        "modalidad": None,
+                        "profesor_raw": "Tú",
                     }]
                 }
+
 
                 st.session_state.materias_db.append(materia_manual)
                 st.success(f"Bloqueo '{act_nombre}' agregado.")
@@ -556,7 +678,7 @@ with col_list:
 
             # >>> NUEVO: Botón por materia para buscar promedios
             c_api_1, c_api_2 = st.columns([1, 1])
-            if c_api_1.button("🔍 Buscar sugerencias de Calificacion (IngenieriaTracker)", key=f"api_mat_{i}", width="stretch"):
+            if c_api_1.button("🔍 Buscar sugerencias de Calificacion", key=f"api_mat_{i}", width="stretch"):
                 grupos_actualizados = 0
                 no_encontrados = 0
 
@@ -596,25 +718,27 @@ with col_list:
                 c_api_2.success(f"✅ API: {grupos_actualizados} encontrados | ❌ {no_encontrados} no encontrados")
                 st.rerun()
 
-            if st.button(f"🗑️ Eliminar asignatura", key=f"del_mat_{i}"):
+            if st.button(f"Eliminar asignatura", key=f"del_mat_{i}"):
                 st.session_state.materias_db.pop(i)
                 st.rerun()
 
             for j, g in enumerate(m['grupos']):
                 if g['gpo'] == "N/A": continue
 
-                c_check, c_info, c_calif = st.columns([0.15, 0.65, 0.2])
+                c_check, c_info, c_calif = st.columns([0.22, 0.58, 0.20])
 
-                activo = c_check.checkbox(
-                    "Activar",
+                activo = c_check.toggle(
+                    "Incluir",
                     value=g.get('activo', True),
-                    key=f"chk_{i}_{j}",
+                    key=f"tgl_{i}_{j}",
                     label_visibility="collapsed"
                 )
+
                 st.session_state.materias_db[i]['grupos'][j]['activo'] = activo
 
                 vacs = g.get('vacantes', 0)
                 color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+
 
                 # >>> NUEVO: sugerencia API visible
                 sug = g.get("sugerencia_api", None)
@@ -625,11 +749,11 @@ with col_list:
 
                 if consultado:
                     if sug is not None:
-                        sug_txt = f"⭐ Sugerencia API: <strong>{float(sug):.2f}</strong>"
+                        sug_txt = f"⭐ Sugerencia Calificacion: <strong>{float(sug):.2f}</strong>"
                         if num_res is not None:
                             sug_txt += f" <span style='color:gray'>(reseñas: {num_res})</span>"
                     else:
-                        sug_txt = "<span style='color:gray;'>⭐ Sugerencia API: No encontrado</span>"
+                        sug_txt = "<span style='color:gray;'>⭐ Sugerencia Calificacion: No encontrado</span>"
 
                 # --- Mostrar grupo ---
                 vacs = g.get('vacantes', 0)
@@ -671,7 +795,13 @@ with col_list:
 
                     st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
 
+                    st.markdown(
+                        "<div style='height:6px; border-bottom: 1px solid rgba(200,200,200,0.25); margin: 6px 0;'></div>",
+                        unsafe_allow_html=True
+                    )
+
 # --- BOTÓN DE GENERACIÓN ---
+st.markdown("---")
 if st.button("Generar combinaciones optimizadas", width="stretch"):
     if not st.session_state.materias_db:
         st.error("No puedes generar horarios sin materias. Agrega al menos una.")
@@ -756,7 +886,34 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
             for i, tab in enumerate(tabs):
                 with tab:
                     opcion = posibles[i]
-                    st.write(f"**Puntaje de Excelencia:** {opcion['score']:.2f}")
+
+                    # ============================
+                    # HEADER COMPACTO + EXPORT
+                    # ============================
+                    c_top1, c_top2, c_top3 = st.columns([1.2, 1, 1])
+
+                    # Score compacto (sin título grande)
+                    c_top1.markdown(
+                        f"<div style='font-size: 0.95em; color: #444;'><strong>Score:</strong> {opcion['score']:.2f}</div>",
+                        unsafe_allow_html=True
+                    )
+
+                    # Generar ICS (compacto)
+                    ics_text = generar_ics_desde_opcion(
+                        opcion["materias"],
+                        nombre_calendario=f"Horario - Opción {i+1}"
+                    )
+
+                    c_top2.download_button(
+                        label="Exportar a Calendario (.ics)",
+                        data=ics_text.encode("utf-8"),
+                        file_name=f"horario_opcion_{i+1}.ics",
+                        mime="text/calendar",
+                        use_container_width=True
+                    )
+
+                    # Placeholder para PNG (lo generamos después de construir df_text)
+                    btn_png_slot = c_top3.empty()
 
                     horas_labels = []
                     for h in range(7, 22):
@@ -841,11 +998,28 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
 
                                         df_text.at[horas_labels[h_idx], dia] = texto_celda
 
+                    # ============================
+                    # BOTÓN PNG COMPACTO (ARRIBA)
+                    # ============================
+                    try:
+                        png_bytes = dataframe_a_png(df_text)
+                        btn_png_slot.download_button(
+                            label="Descargar imagen (.png)",
+                            data=png_bytes,
+                            file_name=f"horario_opcion_{i+1}.png",
+                            mime="image/png",
+                            use_container_width=True
+                        )
+                    except:
+                        btn_png_slot.button("Descargar imagen (.png)", disabled=True, use_container_width=True)
+
                     st.dataframe(
                         df_text.style.apply(lambda x: df_color, axis=None),
                         height=900,
                         width="stretch"
                     )
+                    
+
         else:
             st.warning(
                 "No se encontraron combinaciones válidas. "
