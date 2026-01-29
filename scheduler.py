@@ -6,7 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 import gc
 import heapq
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import io
 import matplotlib.pyplot as plt
 
@@ -378,7 +378,7 @@ def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI 
 
             ics.append("BEGIN:VEVENT")
             ics.append(f"UID:{uid}")
-            ics.append(f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}")
+            ics.append(f"DTSTAMP:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
             ics.append(f"DTSTART:{dtstart_str}")
             ics.append(f"DTEND:{dtend_str}")
             ics.append(f"SUMMARY:{summary}")
