@@ -437,7 +437,7 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     Presiona el botón al final para ver las mejores combinaciones posibles.
 
     ⚠️ **Aviso importante:** Esta app **NO es dueña** de IngenieriaTracker ni está afiliada.  
-    Todo el crédito de reseñas y datos mostrados pertenece a **www.ingenieriatracker.com**.
+    Todo el crédito de la base de datos de las reseñas a **www.ingenieriatracker.com**.
     """)
 
 
