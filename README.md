@@ -89,15 +89,6 @@ Asigna un valor del **0 al 10** a cada profesor.
 
 <img width="844" height="801" alt="image" src="https://github.com/user-attachments/assets/786fa092-357a-4a98-8394-f6bffa219765" />
 
-        ## ⚠️ Aviso importante / Créditos (IngenieriaTracker)
-    Esta aplicación **NO es propietaria**, **NO está afiliada**, y **NO está patrocinada** por **IngenieriaTracker**.
-
-    - El sitio **www.ingenieriatracker.com** y su API pertenecen a sus respectivos autores.
-    - Esta app únicamente **consulta información pública** para mostrar una referencia rápida de calificación.
-    - **Todo el crédito** por las reseñas y promedios corresponde a **IngenieriaTracker** y su comunidad.
-
-    Si te sirve esta función, considera visitar y apoyar su plataforma: **www.ingenieriatracker.com**
-
 ---
 
 ## 5. Consulta Promedios de Profesores (Nuevo)
@@ -115,6 +106,16 @@ Esto mostrará una **sugerencia de promedio** por profesor.
 📌 **Esta función es nueva**, si notas algún error o nombre no detectado, mándame mensaje para mejorar coincidencias.
 
 <img width="1213" height="996" alt="image" src="https://github.com/user-attachments/assets/cdd98f69-bd9f-4d4b-836e-ef784e866644" />
+
+
+        ## ⚠️ Aviso importante / Créditos (IngenieriaTracker)
+    Esta aplicación **NO es propietaria**, **NO está afiliada**, y **NO está patrocinada** por **IngenieriaTracker**.
+
+    - El sitio **www.ingenieriatracker.com** y su API pertenecen a sus respectivos autores.
+    - Esta app únicamente **consulta información pública** para mostrar una referencia rápida de calificación.
+    - **Todo el crédito** por las reseñas y promedios corresponde a **IngenieriaTracker** y su comunidad.
+
+    Si te sirve esta función, considera visitar y apoyar su plataforma: **www.ingenieriatracker.com**
 
 
 ---
