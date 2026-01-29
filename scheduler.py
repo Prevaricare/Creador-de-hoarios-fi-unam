@@ -9,16 +9,13 @@ import heapq
 from datetime import datetime, timedelta, timezone
 import io
 import matplotlib.pyplot as plt
-
-
-# >>> NUEVO
 import urllib.parse
 import unicodedata
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Generador de Horarios", layout="wide")
 
-# --- FUNCIONES AUXILIARES (FALTABAN ESTAS) ---
+# --- FUNCIONES AUXILIARES---
 def hora_a_minutos(hora_str):
     try:
         h, m = map(int, hora_str.split(':'))
@@ -35,44 +32,27 @@ def extraer_intervalos(horario_str, dias_lista):
     except:
         return []
 
-# >>> NUEVO: limpiar nombres para mejorar coincidencia en API
 def limpiar_nombre_profesor(nombre):
     if not nombre:
         return ""
-
-    # Quitar etiquetas y saltos raros
     n = nombre.replace("(PRESENCIAL)", "").replace("\n", " ").strip()
-
-    # Normalizar espacios
     n = re.sub(r"\s+", " ", n)
-
-    # Quitar prefijos comunes (puedes añadir más si aparecen)
     prefijos = [
         "M. EN I.", "M EN I.", "M.I.", "MI.", "M I.",
         "DR.", "DRA.", "MTRO.", "MTRA.", "LIC.", "ING.", "ISC.",
         "M.C.", "M C.", "M.A.", "M A.", "PROF.", "ARQ."
     ]
-
-    # Eliminar prefijo si viene al inicio
     upper_n = n.upper()
     for p in prefijos:
         if upper_n.startswith(p):
             n = n[len(p):].strip()
             break
-
-    # Quitar puntos extra
     n = n.replace(".", " ")
-
-    # Normalizar acentos (Sánchez -> Sanchez)
     n = unicodedata.normalize("NFD", n)
     n = "".join(ch for ch in n if unicodedata.category(ch) != "Mn")
-
-    # Normalizar espacios otra vez
     n = re.sub(r"\s+", " ", n).strip()
-
     return n
 
-# >>> NUEVO: consulta API IngenieriaTracker (solo devuelve sugerencia)
 def consultar_ingenieria_tracker(nombre_profesor):
     """
     Retorna dict con:
@@ -106,15 +86,9 @@ def refrescar_vacantes():
     n_actualizados = 0
     with st.spinner("Actualizando cupos en tiempo real..."):
         for materia in st.session_state.materias_db:
-
-            # >>> NUEVO: ignorar bloqueos manuales de forma segura
             if materia.get("es_bloqueo", False):
                 continue
-
-            # Tomamos lo que está antes del " - " (clave si es materia real)
             clave_raw = str(materia.get("materia", "")).split(" - ")[0].strip()
-
-            # Si no es numérico, no se puede refrescar desde la UNAM
             if not clave_raw.isdigit():
                 continue
 
@@ -134,7 +108,6 @@ def refrescar_vacantes():
                             break
 
     st.success(f"Se actualizaron {n_actualizados} grupos.")
-
 
 # --- CARGA DE CATÁLOGO DE MATERIAS ---
 @st.cache_data
@@ -198,19 +171,14 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                 if datos[0] == "Clave": continue
 
                 gpo = datos[1]
-                # --- PROFESOR Y MODALIDAD (CORREGIDO) ---
+                # --- PROFESOR Y MODALIDAD---
                 profesor_raw = datos[2].replace("\n", " ").strip()
 
-                # Detectar modalidad por etiqueta entre paréntesis
                 modalidad = None
                 match_modalidad = re.search(r"\(([^)]+)\)", profesor_raw)
                 if match_modalidad:
                     modalidad = match_modalidad.group(1).strip().upper()
-
-                # Limpiar etiquetas (EN LÍNEA / PRESENCIAL / etc.)
                 profesor_limpio = re.sub(r"\([^)]*\)", "", profesor_raw).strip()
-
-                # Opcional: quitar prefijos comunes (para API)
                 profesor_limpio = re.sub(
                     r"^(ING\.|DR\.|DRA\.|M\.I\.|M\. EN I\.|MC\.|MTRO\.|MTRA\.|LIC\.|ARQ\.)\s+",
                     "",
@@ -231,9 +199,9 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
 
                 datos_materia["grupos"].append({
                     "gpo": gpo,
-                    "profesor": profesor,            # <- nombre limpio
-                    "profesor_raw": profesor_raw,    # <- opcional: guardar el original
-                    "modalidad": modalidad,          # <- NUEVO
+                    "profesor": profesor,
+                    "profesor_raw": profesor_raw,
+                    "modalidad": modalidad,
                     "horario": horario,
                     "dias": dias_str,
                     "intervalos": intervalos,
@@ -241,8 +209,6 @@ def obtener_datos_unam(clave_materia, es_obligatoria):
                     "materia_nombre": nombre_materia,
                     "vacantes": vacantes,
                     "activo": vacantes > 0,
-
-                    # >>> API sugerencia (de lo anterior)
                     "api_consultado": False,
                     "sugerencia_api": None,
                     "api_num_resenas": None,
@@ -329,15 +295,12 @@ def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI 
     """
     Convierte una combinación (lista de grupos) en texto ICS.
     """
-    # Cabecera básica ICS
     ics = []
     ics.append("BEGIN:VCALENDAR")
     ics.append("VERSION:2.0")
     ics.append("PRODID:-//FI UNAM Scheduler//Streamlit//ES")
     ics.append("CALSCALE:GREGORIAN")
     ics.append(f"X-WR-CALNAME:{nombre_calendario}")
-
-    # Creamos eventos
     for g in materias_combinadas:
         if g.get("gpo") == "N/A":
             continue
@@ -348,18 +311,12 @@ def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI 
         horario = g.get("horario", "")
         dias = g.get("dias", "")
         vacantes = g.get("vacantes", "")
-
-        # Título del evento
         summary = f"{materia_nombre} | GPO {g.get('gpo','')}"
-
-        # Descripción
         desc = f"Profesor: {profesor}"
         if modalidad:
             desc += f" ({modalidad})"
         desc += f"\\nHorario: {dias} {horario}"
         desc += f"\\nVacantes: {vacantes}"
-
-        # Cada intervalo es un evento (por día)
         for s in g.get("intervalos", []):
             dia = s.get("dia")
             fecha = _proxima_fecha_para_dia(dia)
@@ -422,8 +379,6 @@ st.title("Generador de Horarios")
 
 if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
-
-# >>> NUEVO: cache local de consultas API (para no repetir)
 if "api_cache_profes" not in st.session_state:
     st.session_state.api_cache_profes = {}
 
@@ -445,12 +400,10 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     * Usa **🔄 Refrescar Cupos** para actualizar vacantes sin borrar tus materias.
 
     **4. Consulta Promedios de Profesores:**
-    Dentro de cada materia, presiona **🔍 Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
+    Dentro de cada materia, presiona **Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
 
     *  Esta sugerencia **no modifica** tu calificación manual.
     *  Si no hay coincidencia, se mostrará **“No encontrado”**.
-
-
 
     **5. Personaliza:**
     * **Bloqueos:** Agrega tus horas de comida, trabajo o traslado en el panel izquierdo ("Actividad Manual").
@@ -458,9 +411,6 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
 
     **6. Genera:**
     Presiona el botón al final para ver las mejores combinaciones posibles.
-
-    **Versión Automatizada:**
-    El sistema descarga los horarios directamente desde la Facultad, sin necesidad de copiar y pegar.
     """)
 
 
@@ -626,8 +576,6 @@ with col_in:
                 materia_manual = {
                     "materia": act_nombre,
                     "obligatoria": True,
-
-                    # >>> NUEVO: identificador robusto para que NO se trate como materia UNAM
                     "es_bloqueo": True,
 
                     "grupos": [{
@@ -645,8 +593,6 @@ with col_in:
                         "api_num_resenas": None,
                         "api_nombre_match": None,
                         "api_consultado": False,
-
-                        # >>> NUEVO: para consistencia con el resto
                         "modalidad": None,
                         "profesor_raw": "Tú",
                     }]
@@ -675,8 +621,6 @@ with col_list:
         status = " (Opcional)" if not m['obligatoria'] else ""
 
         with st.expander(f"{m['materia']}{status}", expanded=True):
-
-            # >>> NUEVO: Botón por materia para buscar promedios
             c_api_1, c_api_2 = st.columns([1, 1])
             if c_api_1.button("🔍 Buscar sugerencias de Calificacion", key=f"api_mat_{i}", width="stretch"):
                 grupos_actualizados = 0
@@ -691,15 +635,11 @@ with col_list:
 
                         nombre_original = g.get("profesor", "")
                         nombre_limpio = limpiar_nombre_profesor(nombre_original)
-
-                        # Cache para no repetir consultas
                         if nombre_limpio in st.session_state.api_cache_profes:
                             resultado = st.session_state.api_cache_profes[nombre_limpio]
                         else:
                             resultado = consultar_ingenieria_tracker(g.get("profesor", ""))
                             st.session_state.api_cache_profes[nombre_limpio] = resultado
-
-                        # >>> NUEVO: marcar como consultado
                         st.session_state.materias_db[i]['grupos'][j]['api_consultado'] = True
 
                         promedio = resultado.get("promedio", None)
@@ -738,14 +678,11 @@ with col_list:
 
                 vacs = g.get('vacantes', 0)
                 color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
-
-
-                # >>> NUEVO: sugerencia API visible
                 sug = g.get("sugerencia_api", None)
                 num_res = g.get("api_num_resenas", None)
                 consultado = g.get("api_consultado", False)
 
-                sug_txt = ""  # <- Por defecto no mostramos nada si no se ha consultado
+                sug_txt = ""
 
                 if consultado:
                     if sug is not None:
@@ -754,12 +691,8 @@ with col_list:
                             sug_txt += f" <span style='color:gray'>(reseñas: {num_res})</span>"
                     else:
                         sug_txt = "<span style='color:gray;'>⭐ Sugerencia Calificacion: No encontrado</span>"
-
-                # --- Mostrar grupo ---
                 vacs = g.get('vacantes', 0)
                 color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
-
-                # Modalidad (EN LÍNEA / PRESENCIAL / etc.)
                 modalidad = g.get("modalidad", None)
                 modalidad_txt = f" <span style='color: #555;'>({modalidad})</span>" if modalidad else ""
 
@@ -771,10 +704,8 @@ with col_list:
                     {sug_txt}
                 </div>
                 """
-
                 c_info.markdown(info_html, unsafe_allow_html=True)
 
-                # --- Input de calificación manual (igual que antes) ---
                 if g['profesor'] != "Tú":
                     key_widget = f"cal_{i}_{j}"
 
@@ -834,7 +765,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
         # TOP-10 incremental (NO guarda todas las combinaciones)
         # ==========================================================
         TOP_K = 10
-        top_heap = []  # min-heap: (score, idx, comb)
+        top_heap = []
 
         MAX_COMBINACIONES_A_REVISAR = 1000000
         barra_progreso = st.progress(0)
@@ -850,24 +781,17 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
             if es_horario_valido(comb):
                 sc = calcular_score(comb, pesos)
 
-                # Guardar solo las mejores TOP_K
                 if len(top_heap) < TOP_K:
                     heapq.heappush(top_heap, (sc, idx, comb))
                 else:
-                    # Si esta combinación es mejor que la peor del heap, reemplazar
                     if sc > top_heap[0][0]:
                         heapq.heapreplace(top_heap, (sc, idx, comb))
 
             if idx % 5000 == 0:
                 progreso_val = min(idx / min(total_comb, MAX_COMBINACIONES_A_REVISAR), 1.0)
                 barra_progreso.progress(progreso_val)
-
         barra_progreso.progress(1.0)
-
-        # Ordenar de mayor a menor score
         top_heap_sorted = sorted(top_heap, key=lambda x: x[0], reverse=True)
-
-        # Convertir al formato original
         posibles = [{"materias": comb, "score": sc} for (sc, _, comb) in top_heap_sorted]
 
         # ==========================================================
@@ -891,14 +815,10 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                     # HEADER COMPACTO + EXPORT
                     # ============================
                     c_top1, c_top2, c_top3 = st.columns([1.2, 1, 1])
-
-                    # Score compacto (sin título grande)
                     c_top1.markdown(
                         f"<div style='font-size: 0.95em; color: #444;'><strong>Score:</strong> {opcion['score']:.2f}</div>",
                         unsafe_allow_html=True
                     )
-
-                    # Generar ICS (compacto)
                     ics_text = generar_ics_desde_opcion(
                         opcion["materias"],
                         nombre_calendario=f"Horario - Opción {i+1}"
@@ -912,32 +832,24 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                         use_container_width=True
                     )
 
-                    # Placeholder para PNG (lo generamos después de construir df_text)
                     btn_png_slot = c_top3.empty()
-
                     horas_labels = []
                     for h in range(7, 22):
                         horas_labels.append(f"{h:02d}:00")
                         horas_labels.append(f"{h:02d}:30")
-
                     dias_cols = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]
-
                     df_text = pd.DataFrame("", index=horas_labels, columns=dias_cols)
                     df_color = pd.DataFrame("", index=horas_labels, columns=dias_cols)
-
                     materia_color_map = {}
                     color_idx = 0
-
                     for m_g in opcion['materias']:
                         if m_g['gpo'] == "N/A":
                             continue
-
                         nombre_mat = m_g['materia_nombre']
                         if nombre_mat not in materia_color_map:
                             materia_color_map[nombre_mat] = colores[color_idx % len(colores)]
                             color_idx += 1
                         bg_color = materia_color_map[nombre_mat]
-
                         if " - " in nombre_mat:
                             partes = nombre_mat.split(' - ')
                             clave = partes[0]
@@ -945,30 +857,23 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                         else:
                             clave = ""
                             nombre_limpio = nombre_mat
-
                         nombre_limpio = (nombre_limpio[:20] + '..') if len(nombre_limpio) > 20 else nombre_limpio
                         profesor_corto = m_g['profesor'].split('\n')[0][:18]
-
                         vacs_grupo = m_g.get("vacantes", None)
-
                         sin_cupo = False
                         try:
                             if vacs_grupo is not None and int(vacs_grupo) <= 0:
                                 sin_cupo = True
                         except:
                             sin_cupo = False
-
                         tag_cupo = " ⚠️SIN CUPO" if sin_cupo else ""
-
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
                             h_f = f"{s['fin']//60:02d}:{'30' if (s['fin']%60 >= 30) else '00'}"
-
                             if h_i in horas_labels and h_f in horas_labels:
                                 start_idx = horas_labels.index(h_i)
                                 end_idx = horas_labels.index(h_f)
                                 duracion_bloques = end_idx - start_idx
-
                                 for counter, h_idx in enumerate(range(start_idx, end_idx)):
                                     dia = s['dia']
                                     if dia in dias_cols:
@@ -976,9 +881,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                                             estilo = f"background-color: {bg_color}; color: #000000; border: 2px solid #ff4d4d;"
                                         else:
                                             estilo = f"background-color: {bg_color}; color: #000000;"
-
                                         df_color.at[horas_labels[h_idx], dia] = estilo
-
                                         texto_celda = ""
                                         if duracion_bloques == 1:
                                             if counter == 0:
@@ -995,7 +898,6 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                                                 texto_celda = f"{nombre_limpio}"
                                             if counter == 2:
                                                 texto_celda = f"{profesor_corto}"
-
                                         df_text.at[horas_labels[h_idx], dia] = texto_celda
 
                     # ============================
@@ -1018,15 +920,11 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                         height=900,
                         width="stretch"
                     )
-                    
-
         else:
             st.warning(
                 "No se encontraron combinaciones válidas. "
                 "Intenta relajar tus restricciones (ej. permitir huecos o más turnos)."
             )
-
-        # Limpieza
         del posibles
         del top_heap
         del top_heap_sorted
