@@ -974,5 +974,5 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
 st.markdown("---")
 footer_col1, footer_col2, footer_col3 = st.columns([3, 2, 3])
 with footer_col2:
-    st.markdown("<div style='text-align: center; color: gray; font-size: 0.9em;'>Gael prevaricare</div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align: center; color: gray; font-size: 0.9em;'>Creado por: Gael prevaricare</div>", unsafe_allow_html=True)
     st.link_button("Instagram", "https://www.instagram.com/gaelprevaricare/", width="stretch")
