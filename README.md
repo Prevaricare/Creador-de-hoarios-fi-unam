@@ -104,7 +104,8 @@ Esto mostrará una **sugerencia de promedio** por profesor.
 
 📌 **Esta función es nueva**, si notas algún error o nombre no detectado, mándame mensaje para mejorar coincidencias.
 
-> 🖼️ **Imagen pendiente:** aquí va la captura de pantalla de esta sección.
+<img width="1213" height="996" alt="image" src="https://github.com/user-attachments/assets/cdd98f69-bd9f-4d4b-836e-ef784e866644" />
+
 
 ---
 
@@ -144,3 +145,41 @@ Esta función actualiza automáticamente la prioridad de los profesores basándo
 
 ### Formato recomendado
 Puedes pegarlo con columnas como:
+
+Clave | Grupo | Profesor | Horario | Días | Calificación
+
+### Notas importantes
+- El sistema intenta detectar coincidencias por nombre de profesor.
+- Si el nombre viene diferente (abreviado o con acentos raros), puede fallar.
+- Si falla, puedes ajustar manualmente.
+
+<img width="1160" height="999" alt="image" src="https://github.com/user-attachments/assets/47fd86fa-143b-4d04-a477-394619b13db1" />
+
+---
+
+# Instalación Local (Para Desarrolladores)
+
+Si quieres correr esto en tu propia computadora:
+
+1. Clona el repositorio:
+   ```bash
+   git clone https://github.com/Prevaricare/Creador-de-hoarios-fi-unam.git
+   
+2. Instala las dependencias:
+   ```bash
+   pip install -r requirements.txt
+   
+3. 
+   ```bash
+   streamlit run scheduler.py
+
+---
+
+Recomendaciones
+
+Si la página se siente lenta, reduce el número de materias o desmarca grupos que no te interesan.
+
+Si una materia no aparece, puede ser porque no hay grupos disponibles o la clave no es válida.
+
+Si quieres horarios más compactos, sube el peso de Minimizar horas muertas.
+
