@@ -72,7 +72,7 @@ def link_profesor_ingenieriatracker(nombre_profesor):
         return None
 
     slug = nombre_limpio.strip().upper().replace(" ", "-")
-    slug = re.sub(r"-+", "-", slug)  # evitar dobles guiones
+    slug = re.sub(r"-+", "-", slug)
 
     return f"https://www.ingenieriatracker.com/#/profesores/{slug}"
 
@@ -723,7 +723,7 @@ with col_list:
                             if link:
                                 sug_txt += (
                                     f" <a href='{link}' target='_blank' style='color:gray; text-decoration:none;'>"
-                                    f"(reseñas: {num_res})</a>"
+                                    f"(Ver reseñas: {num_res})</a>"
                                 )
                             else:
                                 sug_txt += f" <span style='color:gray'>(reseñas: {num_res})</span>"
