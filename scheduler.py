@@ -14,6 +14,13 @@ import unicodedata
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Generador de Horarios", layout="wide")
+st.markdown(
+    "<div style='font-size:0.85em; color:gray; margin-top:-8px; margin-bottom:10px;'>"
+    "<a href='https://www.instagram.com/gaelprevaricare/' target='_blank' style='text-decoration:none;'>"
+    "@gaelprevaricare</a></div>",
+    unsafe_allow_html=True
+)
+
 
 # --- FUNCIONES AUXILIARES---
 def hora_a_minutos(hora_str):
@@ -52,6 +59,22 @@ def limpiar_nombre_profesor(nombre):
     n = "".join(ch for ch in n if unicodedata.category(ch) != "Mn")
     n = re.sub(r"\s+", " ", n).strip()
     return n
+
+def link_profesor_ingenieriatracker(nombre_profesor):
+    """
+    Genera el link directo al perfil del profesor en IngenieriaTracker.
+    Ejemplo:
+      'JOSE SALVADOR SALINAS TELESFORO'
+      -> https://www.ingenieriatracker.com/#/profesores/JOSE-SALVADOR-SALINAS-TELESFORO
+    """
+    nombre_limpio = limpiar_nombre_profesor(nombre_profesor)
+    if not nombre_limpio:
+        return None
+
+    slug = nombre_limpio.strip().upper().replace(" ", "-")
+    slug = re.sub(r"-+", "-", slug)  # evitar dobles guiones
+
+    return f"https://www.ingenieriatracker.com/#/profesores/{slug}"
 
 def consultar_ingenieria_tracker(nombre_profesor):
     """
@@ -399,11 +422,12 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     * **Desmarca la casilla** ☑️ de los grupos que no te interesen para que el generador los ignore.
     * Usa **🔄 Refrescar Cupos** para actualizar vacantes sin borrar tus materias.
 
-    **4. Consulta Promedios de Profesores:**
-    Dentro de cada materia, presiona **Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
+    **4. Consulta Promedios de Profesores (Nuevo):**
+    Dentro de cada materia, presiona **🔍 Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
 
-    *  Esta sugerencia **no modifica** tu calificación manual.
-    *  Si no hay coincidencia, se mostrará **“No encontrado”**.
+    * Esta sugerencia **NO modifica** tu calificación manual.
+    * Si no hay coincidencia, se mostrará **"No encontrado"**.
+    * Puedes dar click en **(reseñas: #)** para abrir el perfil del profesor.
 
     **5. Personaliza:**
     * **Bloqueos:** Agrega tus horas de comida, trabajo o traslado en el panel izquierdo ("Actividad Manual").
@@ -411,6 +435,9 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
 
     **6. Genera:**
     Presiona el botón al final para ver las mejores combinaciones posibles.
+
+    ⚠️ **Aviso importante:** Esta app **NO es dueña** de IngenieriaTracker ni está afiliada.  
+    Todo el crédito de reseñas y datos mostrados pertenece a **www.ingenieriatracker.com**.
     """)
 
 
@@ -687,10 +714,23 @@ with col_list:
                 if consultado:
                     if sug is not None:
                         sug_txt = f"⭐ Sugerencia Calificacion: <strong>{float(sug):.2f}</strong>"
+
                         if num_res is not None:
-                            sug_txt += f" <span style='color:gray'>(reseñas: {num_res})</span>"
+                            # Preferimos el nombre exacto que regresó la API (mejor match)
+                            nombre_match = g.get("api_nombre_match") or g.get("profesor", "")
+                            link = link_profesor_ingenieriatracker(nombre_match)
+
+                            if link:
+                                sug_txt += (
+                                    f" <a href='{link}' target='_blank' style='color:gray; text-decoration:none;'>"
+                                    f"(reseñas: {num_res})</a>"
+                                )
+                            else:
+                                sug_txt += f" <span style='color:gray'>(reseñas: {num_res})</span>"
+
                     else:
                         sug_txt = "<span style='color:gray;'>⭐ Sugerencia Calificacion: No encontrado</span>"
+
                 vacs = g.get('vacantes', 0)
                 color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
                 modalidad = g.get("modalidad", None)
