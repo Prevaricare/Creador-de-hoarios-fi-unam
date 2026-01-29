@@ -182,8 +182,8 @@ Puedes mandarme mensaje o abrir un **Issue** en GitHub.
 
 ---
 
-Hecho por **Gael Prevaricare**  
-Instagram: **[@gaelprevaricare](https://www.instagram.com/gaelprevaricare/)**
+## Hecho por **Gael Prevaricare**  
+## Instagram: **[@gaelprevaricare](https://www.instagram.com/gaelprevaricare/)**
 
 ---
 
