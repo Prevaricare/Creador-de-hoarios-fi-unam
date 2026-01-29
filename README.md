@@ -91,6 +91,8 @@ Asigna un valor del **0 al 10** a cada profesor.
 
 ---
 
+---
+
 ## 5. Consulta Promedios de Profesores (Nuevo)
 Dentro de cada materia, presiona:
 
@@ -100,6 +102,7 @@ Esto mostrará una **sugerencia de promedio** por profesor.
 
 - Esta sugerencia **NO modifica** tu calificación manual.
 - Si no hay coincidencia, se mostrará **"No encontrado"**.
+- Puedes dar click en **(reseñas: #)** para abrir el perfil del profesor.
 - Úsalo como referencia rápida cuando no conoces al profesor.
 
 📌 **Esta función es nueva**, si notas algún error o nombre no detectado, mándame mensaje para mejorar coincidencias.
@@ -173,6 +176,16 @@ Si quieres correr esto en tu propia computadora:
    ```bash
    streamlit run scheduler.py
 
+---
+        ## ⚠️ Aviso importante / Créditos (IngenieriaTracker)
+    Esta aplicación **NO es propietaria**, **NO está afiliada**, y **NO está patrocinada** por **IngenieriaTracker**.
+
+    - El sitio **www.ingenieriatracker.com** y su API pertenecen a sus respectivos autores.
+    - Esta app únicamente **consulta información pública** para mostrar una referencia rápida de calificación.
+    - **Todo el crédito** por las reseñas y promedios corresponde a **IngenieriaTracker** y su comunidad.
+
+    Si te sirve esta función, considera visitar y apoyar su plataforma: **www.ingenieriatracker.com**
+    
 ---
 
 ## Soporte / Bugs
