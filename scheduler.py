@@ -20,6 +20,20 @@ st.markdown(
     "@gaelprevaricare</a></div>",
     unsafe_allow_html=True
 )
+st.markdown("""
+<style>
+/* Agrandar toggle (switch) */
+div[data-testid="stToggle"] label {
+    transform: scale(5);
+    transform-origin: left center;
+}
+
+/* Ajustar espaciado para que no se encime */
+div[data-testid="stToggle"] {
+    padding-top: 6px;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # --- FUNCIONES AUXILIARES---
