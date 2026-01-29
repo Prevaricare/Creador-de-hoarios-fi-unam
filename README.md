@@ -169,17 +169,21 @@ Si quieres correr esto en tu propia computadora:
    ```bash
    pip install -r requirements.txt
    
-3. 
+3. Ejecuta la app:
    ```bash
    streamlit run scheduler.py
 
 ---
 
-Recomendaciones
+## Soporte / Bugs
 
-Si la página se siente lenta, reduce el número de materias o desmarca grupos que no te interesan.
+¿Encontraste un fallo o algo raro?  
+Puedes mandarme mensaje o abrir un **Issue** en GitHub.
 
-Si una materia no aparece, puede ser porque no hay grupos disponibles o la clave no es válida.
+---
 
-Si quieres horarios más compactos, sube el peso de Minimizar horas muertas.
+Hecho por **Gael Prevaricare**  
+Instagram: **[@gaelprevaricare](https://www.instagram.com/gaelprevaricare/)**
+
+---
 
