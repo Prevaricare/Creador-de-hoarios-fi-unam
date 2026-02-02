@@ -517,7 +517,7 @@ def dataframe_a_png(df_text, df_color=None):
     return buf.getvalue()
 
 # --- INTERFAZ DE USUARIO ---
-st.title("Generador de Horarios")
+st.title("Generador de Horarios FI")
 
 if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
@@ -534,7 +534,7 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     Si no sabes la clave de tu materia (ej. 1120, 1601), consúltala en los [Mapas Curriculares Oficiales](http://escolar.ingenieria.unam.mx/mapas/).
 
     **2. Ingresa y Agrega:**
-    Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej. `1730` o `1120, 1601, 32`) y presiona **Buscar y Agregar Materias**.
+    Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej. `1730` o `1120, 1601, 32`) y presiona **Agregar Materias**.
 
     **3. Revisa Grupos y Cupos:**
     En la lista de la derecha verás los grupos disponibles con sus vacantes.
@@ -573,15 +573,15 @@ col_in, col_list = st.columns([1, 1.2])
 # ==========================================
 with col_in:
     st.subheader("1. Carga de Materias")
-    if not st.session_state.materias_db:
-        st.info("👋 Inicia aquí ingresando tus claves (ej: 1601, 1120, 1730) y presiona **Buscar y Agregar Materias**.")
+    
+    st.caption("Inicia aquí ingresando tus claves y presiona **Agregar Materias**.")
     
     clave_input = st.text_input(
-        "## Ingresa clave por clave o juntas separadas por comas:",
+        "## Claves:",
         placeholder="Ejemplo: 1730 ó 1120, 1601, 32"
     )
 
-    if st.button("Buscar y Agregar Materias", width="stretch"):
+    if st.button("Agregar Materias", width="stretch"):
         lista_claves = [c.strip() for c in clave_input.split(',') if c.strip()]
 
         if not lista_claves:
@@ -620,9 +620,9 @@ with col_in:
                     st.error(f"❌ {e}")
 
     # ==========================================================
-    # --- AGREGAR ACTIVIDAD MANUAL / BLOQUEO ---
+    # --- AGREGAR ACTIVIDAD Personal ---
     # ==========================================================
-    with st.expander("Agregar Actividad Manual / Bloqueo", expanded=False):
+    with st.expander("Agregar Actividad Personal", expanded=False):
         st.info("Bloquea horarios para Trabajo, Comida, Transporte, etc.")
         act_nombre = st.text_input("Nombre de la actividad", "Actividad Personal")
         act_dias = st.multiselect("Días", ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
@@ -631,7 +631,7 @@ with col_in:
         t_inicio = c_hora1.time_input("Inicio")
         t_fin = c_hora2.time_input("Fin")
 
-        if st.button("Agregar Bloqueo", width="stretch"):
+        if st.button("Agregar Actividad", width="stretch"):
             if act_nombre and act_dias:
                 str_horario = f"{t_inicio.strftime('%H:%M')} a {t_fin.strftime('%H:%M')}"
                 intervalos_manual = extraer_intervalos(str_horario, act_dias)
@@ -670,45 +670,46 @@ with col_in:
     # ==========================================================
     # CONFIGURACIÓN (ANTES SIDEBAR) - AHORA EN COLUMNA IZQUIERDA
     # ==========================================================
-    st.subheader("⚙️ Configuración de Pesos")
+    st.caption("Configura aqui las preferencias de tu horario")
+    with st.expander("⚙️ Configuración de Pesos", expanded=True):
 
-    tipo_turno = st.selectbox(
-        "Preferencia de Turno",
-        ["Mañana (Temprano)", "Tarde / Noche", "Mixto"],
-        help="Elige en qué momento del día prefieres tomar clases."
-    )
+        tipo_turno = st.selectbox(
+            "Preferencia de Turno",
+            ["Mañana (Temprano)", "Tarde / Noche", "Mixto"],
+            help="Elige en qué momento del día prefieres tomar clases."
+        )
 
-    w_turno = st.slider(
-        "Importancia del Turno",
-        0, 100, 30,
-        help="Qué tanto debe esforzarse el sistema por respetar tu preferencia de mañana o tarde."
-    )
+        w_turno = st.slider(
+            "Importancia del Turno",
+            0, 100, 30,
+            help="Qué tanto debe esforzarse el sistema por respetar tu preferencia de mañana o tarde."
+        )
 
-    w_huecos = st.slider(
-        "Minimizar horas muertas",
-        0, 100, 50,
-        help="Busca juntar tus clases para que no tengas tiempos libres excesivos entre ellas."
-    )
+        w_huecos = st.slider(
+            "Minimizar horas muertas",
+            0, 100, 50,
+            help="Busca juntar tus clases para que no tengas tiempos libres excesivos entre ellas."
+        )
 
-    w_profes = st.slider(
-        "Calificación de profesores",
-        0, 100, 70,
-        help="Da prioridad a los profesores con mayor calificación."
-    )
+        w_profes = st.slider(
+            "Calificación de profesores",
+            0, 100, 70,
+            help="Da prioridad a los profesores con mayor calificación."
+        )
 
-    w_carga = st.slider(
-        "Cantidad de materias",
-        0, 100, 80,
-        help="Intenta inscribir el mayor número posible de materias de tu lista."
-    )
+        w_carga = st.slider(
+            "Cantidad de materias",
+            0, 100, 80,
+            help="Intenta inscribir el mayor número posible de materias de tu lista."
+        )
 
-    pesos = {
-        "huecos": w_huecos,
-        "profes": w_profes,
-        "tipo_turno": tipo_turno,
-        "peso_turno": w_turno,
-        "carga": w_carga
-    }
+        pesos = {
+            "huecos": w_huecos,
+            "profes": w_profes,
+            "tipo_turno": tipo_turno,
+            "peso_turno": w_turno,
+            "carga": w_carga
+        }
 
     st.markdown("---")
 
