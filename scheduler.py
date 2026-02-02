@@ -473,30 +473,45 @@ def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI 
 
 # EXPORTACIÓN COMO IMAGEN (PNG)
 
-def dataframe_a_png(df_text):
+def dataframe_a_png(df_text, df_color=None):
     """
-    Renderiza un DataFrame como imagen PNG con matplotlib.
-    Devuelve bytes PNG.
+    Exporta un DataFrame a PNG. Si df_color viene, aplica background-color por celda.
+    df_color debe contener strings tipo: "background-color: #FFCDD2; color: #000000;"
     """
-    alto_fig = max(4, min(14, 1.0 + len(df_text) * 0.35))
-    fig, ax = plt.subplots(figsize=(12, alto_fig))
+    fig, ax = plt.subplots(figsize=(12, 18))
     ax.axis("off")
 
     tabla = ax.table(
         cellText=df_text.values,
-        colLabels=df_text.columns,
         rowLabels=df_text.index,
-        loc="center",
-        cellLoc="center"
+        colLabels=df_text.columns,
+        cellLoc="center",
+        loc="center"
     )
 
     tabla.auto_set_font_size(False)
-    tabla.set_fontsize(7)
-    tabla.scale(1.0, 1.35)
+    tabla.set_fontsize(8)
+    tabla.scale(1, 1.4)
 
+    # Colorear celdas si viene df_color
+    if df_color is not None:
+        for r in range(df_text.shape[0]):
+            for c in range(df_text.shape[1]):
+                estilo = df_color.iat[r, c]
+                if isinstance(estilo, str) and "background-color" in estilo:
+                    try:
+                        bg = estilo.split("background-color:")[1].split(";")[0].strip()
+                        tabla[(r+1, c)].set_facecolor(bg)  # +1 por header row
+                    except:
+                        pass
+
+                # borde rojo si está marcado en estilo
+                if isinstance(estilo, str) and "border:" in estilo and "ff4d4d" in estilo.lower():
+                    tabla[(r+1, c)].set_linewidth(2)
+
+    # Guardar a bytes
     buf = io.BytesIO()
-    plt.tight_layout()
-    fig.savefig(buf, format="png", dpi=200)
+    plt.savefig(buf, format="png", dpi=200, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
@@ -1200,7 +1215,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                     # BOTÓN PNG COMPACTO (ARRIBA)
                     # ============================
                     try:
-                        png_bytes = dataframe_a_png(df_text)
+                        png_bytes = dataframe_a_png(df_text, df_color)
                         btn_png_slot.download_button(
                             label="Descargar imagen (.png)",
                             data=png_bytes,
