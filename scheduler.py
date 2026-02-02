@@ -781,11 +781,23 @@ with col_in:
 # COLUMNA DERECHA: LISTA Y GESTIÓN
 # ==========================================
 with col_list:
-    c_header_1, c_header_2 = st.columns([2, 1])
+    # Estado global de expanders
+    if "expand_materias" not in st.session_state:
+        st.session_state.expand_materias = True  # empiezan abiertas
+
+    c_header_1, c_header_2, c_header_3 = st.columns([2, 1, 1])
+
     c_header_1.subheader("2. Materias Registradas")
-    if c_header_2.button("🔄 Refrescar Cupos"):
+
+    if c_header_2.button("🔄 Refrescar Cupos", use_container_width=True):
         refrescar_vacantes()
         st.rerun()
+
+    label_expand = "📁 Plegar todo" if st.session_state.expand_materias else "📂 Expandir todo"
+    if c_header_3.button(label_expand, use_container_width=True):
+        st.session_state.expand_materias = not st.session_state.expand_materias
+        st.rerun()
+
 
     if not st.session_state.materias_db:
         st.info("Tu lista está vacía. Comienza ingresando una clave a la izquierda.")
@@ -793,7 +805,8 @@ with col_list:
     for i, m in enumerate(st.session_state.materias_db):
         status = " (Opcional)" if not m['obligatoria'] else ""
 
-        with st.expander(f"{m['materia']}{status}", expanded=True):
+        with st.expander(f"{m['materia']}{status}", expanded=st.session_state.expand_materias):
+
             c_api_1, c_api_2 = st.columns([1, 1])
             if c_api_1.button("🔍 Buscar sugerencias de Calificacion", key=f"api_mat_{i}", width="stretch"):
                 grupos_actualizados = 0
@@ -944,6 +957,17 @@ st.subheader("3. Generación de horarios")
 st.caption(
     "Aquí se generan combinaciones optimizadas con tus materias activas. "
     "El sistema iterará y te mostrará las mejores opciones según tus pesos (huecos, turno, profes, etc.)."
+)
+
+# ============================
+# OPCIONES DE VISUALIZACIÓN
+# ============================
+c_vis1, c_vis2 = st.columns([1, 1])
+
+mostrar_sin_cupo = c_vis1.toggle(
+    "Mostrar ⚠️SIN CUPO en el horario",
+    value=True,
+    help="Si lo apagas, el horario no mostrará la etiqueta ⚠️SIN CUPO, pero seguirá marcando el borde rojo."
 )
 
 if st.button("Generar combinaciones optimizadas", width="stretch"):
@@ -1123,7 +1147,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                                 sin_cupo = True
                         except:
                             sin_cupo = False
-                        tag_cupo = " ⚠️SIN CUPO" if sin_cupo else ""
+                        tag_cupo = " ⚠️SIN CUPO" if (sin_cupo and mostrar_sin_cupo) else ""
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
                             h_f = f"{s['fin']//60:02d}:{'30' if (s['fin']%60 >= 30) else '00'}"
@@ -1187,15 +1211,16 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                     except:
                         btn_png_slot.button("Descargar imagen (.png)", disabled=True, use_container_width=True)
                     
-                    alto_tabla = max(320, min(900, 40 + len(df_text) * 28))
+                    alto_tabla = max(520, min(1200, 120 + len(df_text) * 34))
 
                     st.dataframe(
                         df_text.style.apply(lambda x: df_color, axis=None),
                         height=alto_tabla,
-                        width="stretch"
+                        use_container_width=True
                     )
 
-                    
+
+
                     st.markdown("---")
 
                     # ============================
@@ -1229,7 +1254,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                     df_resumen = pd.DataFrame(lista_resumen)
                     df_resumen = df_resumen.sort_values(["Clave", "Grupo"], ascending=True)
 
-                    st.dataframe(df_resumen, width="stretch", height=220)
+                    st.dataframe(df_resumen, width="stretch", height=420)
 
         else:
             st.warning(
