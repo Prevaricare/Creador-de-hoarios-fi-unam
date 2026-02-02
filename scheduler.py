@@ -213,6 +213,91 @@ def cargar_grupos_actuales(texto_grupos, es_obligatorio=True):
         st.warning(" Algunos datos no se pudieron aplicar:")
         for e in errores:
             st.write(f"- {e}")
+def calcular_penalizacion_por_dia(opcion, config_dias, w_dias=35):
+    """
+    Penaliza/bonifica una opción de horario según configuración avanzada por día.
+    Retorna un número (negativo = peor, positivo = mejor).
+    """
+    if not config_dias or w_dias <= 0:
+        return 0.0
+
+    # Contar bloques de 30 min por día
+    bloques_por_dia = {"Lun": 0, "Mar": 0, "Mie": 0, "Jue": 0, "Vie": 0, "Sab": 0}
+
+    # También sacamos hora promedio por día para ver si fue temprano/tarde
+    # guardamos minutos de inicio por bloque
+    inicios_por_dia = {d: [] for d in bloques_por_dia.keys()}
+
+    for m_g in opcion.get("materias", []):
+        if m_g.get("gpo") == "N/A":
+            continue
+        if not m_g.get("intervalos"):
+            continue
+
+        for s in m_g["intervalos"]:
+            dia = s.get("dia")
+            if dia not in bloques_por_dia:
+                continue
+
+            inicio = int(s.get("inicio", 0))
+            fin = int(s.get("fin", 0))
+
+            duracion = max(0, fin - inicio)
+            # bloques de 30 min
+            bloques = int(duracion // 30)
+            bloques_por_dia[dia] += bloques
+
+            # guardamos el inicio para evaluar temprano/tarde
+            if bloques > 0:
+                inicios_por_dia[dia].append(inicio)
+
+    score = 0.0
+
+    for dia, usados in bloques_por_dia.items():
+        cfg = config_dias.get(dia, {})
+        evitar = cfg.get("evitar", False)
+        max_bloques = int(cfg.get("max_bloques", 20))
+        modo = cfg.get("modo", "Normal")
+        pref = cfg.get("preferencia", "Mixto")
+
+        # 1) Evitar día: penalización fuerte si hay cualquier clase
+        if evitar and usados > 0:
+            score -= 3.0 * usados  # castigo fuerte por cada bloque
+            continue
+
+        # 2) Max bloques deseados: penaliza exceso
+        if usados > max_bloques:
+            score -= 0.6 * (usados - max_bloques)
+
+        # 3) Modo prioridad: premia tener carga en ese día (si no lo evitaste)
+        if modo == "Prioridad":
+            score += 0.15 * usados
+
+        # 4) Preferencia temprano/tarde (usando hora promedio)
+        if pref in ["Temprano", "Tarde"] and inicios_por_dia[dia]:
+            prom_inicio = sum(inicios_por_dia[dia]) / len(inicios_por_dia[dia])
+
+            # temprano = antes de 12:00 (720 min)
+            if pref == "Temprano":
+                if prom_inicio <= 720:
+                    score += 1.0
+                else:
+                    score -= 1.0
+
+            # tarde = después de 12:00
+            if pref == "Tarde":
+                if prom_inicio >= 720:
+                    score += 1.0
+                else:
+                    score -= 1.0
+
+        # Libre: intenta que esté vacío
+        if pref == "Libre" and usados > 0:
+            score -= 1.2 * usados
+
+    # Escalado por peso global
+    score = score * (w_dias / 35.0)
+    return score
 
 
 # --- CARGA DE CATÁLOGO DE MATERIAS ---
@@ -710,6 +795,84 @@ with col_in:
             "peso_turno": w_turno,
             "carga": w_carga
         }
+        # ==========================================================
+        # CONFIGURACIÓN AVANZADA POR DÍA (EXPERIMENTAL)
+        # ==========================================================
+        if "config_dias" not in st.session_state:
+            st.session_state.config_dias = {
+                "Lun": {"modo": "Normal", "preferencia": "Mixto", "max_bloques": 10, "evitar": False},
+                "Mar": {"modo": "Normal", "preferencia": "Mixto",    "max_bloques": 10, "evitar": False},
+                "Mie": {"modo": "Normal", "preferencia": "Mixto", "max_bloques": 10, "evitar": False},
+                "Jue": {"modo": "Normal", "preferencia": "Mixto",    "max_bloques": 10, "evitar": False},
+                "Vie": {"modo": "Normal", "preferencia": "Mixto",    "max_bloques": 10, "evitar": False},
+                "Sab": {"modo": "Normal", "preferencia": "Mixto",    "max_bloques": 10, "evitar": False},
+            }
+
+        with st.expander("⚙️ Configuración avanzada por día `experimental`", expanded=False):
+            st.caption(
+                "Personaliza tus preferencias por día. "
+                "Ejemplo: Lunes/Miércoles temprano y ligero, Martes/Jueves pesado, Viernes libre."
+            )
+
+            # Peso global de esta configuración (qué tanto afecta al score)
+            w_dias = st.slider(
+                "Importancia de preferencias por día",
+                0, 100, 35,
+                help="Entre más alto, más tratará de respetar tu preferencia de carga y horarios por día."
+            )
+
+            st.markdown("---")
+
+            tabs_dias = st.tabs(["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
+
+            dias_lista = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]
+
+            for idx, dia in enumerate(dias_lista):
+                with tabs_dias[idx]:
+                    cfg = st.session_state.config_dias[dia]
+
+                    c1, c2 = st.columns([1, 1])
+
+                    modo = c1.selectbox(
+                        f"{dia} - Modo",
+                        ["Normal", "Prioridad", "Evitar"],
+                        index=["Normal", "Prioridad", "Evitar"].index(cfg.get("modo", "Normal")),
+                        key=f"modo_{dia}",
+                        help="Normal = se comporta normal. Prioridad = intenta meter más carga aquí. Evitar = penaliza clases este día."
+                    )
+
+                    preferencia = c2.selectbox(
+                        f"{dia} - Preferencia de horario",
+                        ["Temprano", "Tarde", "Mixto", "Libre"],
+                        index=["Temprano", "Tarde", "Mixto", "Libre"].index(cfg.get("preferencia", "Mixto")),
+                        key=f"pref_{dia}",
+                        help="Libre intenta evitar ese día (si es posible)."
+                    )
+
+                    max_bloques = st.slider(
+                        f"{dia} - Máximo de bloques (30 min) deseados",
+                        0, 20, int(cfg.get("max_bloques", 10)),
+                        key=f"maxb_{dia}",
+                        help="0 = idealmente libre. 6 = aprox 3 horas. 10 = 5 horas. 14 = 7 horas."
+                    )
+
+                    evitar = st.toggle(
+                        f"{dia} - Evitar este día",
+                        value=bool(cfg.get("evitar", False)),
+                        key=f"ev_{dia}",
+                        help="Si está activo, penaliza fuertemente cualquier clase este día."
+                    )
+
+                    # Guardar cambios
+                    st.session_state.config_dias[dia] = {
+                        "modo": modo,
+                        "preferencia": preferencia,
+                        "max_bloques": max_bloques,
+                        "evitar": evitar
+                    }
+
+            st.markdown("---")
+            st.success("✅ Configuración avanzada guardada automáticamente.")
 
     st.markdown("---")
 
@@ -791,6 +954,7 @@ with col_in:
                         st.rerun()
                     else:
                         st.warning("No encontré coincidencias de nombres.")
+    
 
 
 # ==========================================
@@ -1067,8 +1231,21 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
         # Mostrar resultados
         # ==========================================================
         if posibles:
+
+            # ✅ APLICAR CONFIG AVANZADA POR DÍA AL SCORE (ANTES DE MOSTRAR)
+            for opcion in posibles:
+                opcion["score"] += calcular_penalizacion_por_dia(
+                    opcion,
+                    st.session_state.config_dias,
+                    w_dias=w_dias
+                )
+
+            # ✅ Reordenar opciones con el score actualizado
+            posibles = sorted(posibles, key=lambda x: x["score"], reverse=True)
+
             st.success("¡Horarios generados con éxito!")
             tabs = st.tabs([f"Opción {i+1}" for i in range(len(posibles))])
+
 
             colores = [
                 "#FFCDD2", "#C5CAE9", "#B2DFDB", "#FFF9C4", "#E1BEE7",
