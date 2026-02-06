@@ -1419,16 +1419,20 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                     # ============================
                     # RESUMEN DE MATERIAS (NUEVO)
                     # ============================
-                    st.markdown("###  Resumen del horario ")
+                    st.markdown("### 📋 Resumen del horario ")
 
                     lista_resumen = []
                     for g in opcion["materias"]:
+                        # Ignoramos si no aplica (N/A)
                         if g.get("gpo") == "N/A":
                             continue
 
                         materia_nombre = g.get("materia_nombre", "")
                         profesor = g.get("profesor", "")
                         salon = g.get("salon", "SIN")
+                        
+                        # --- NUEVO: Extraemos las vacantes ---
+                        vacantes = g.get("vacantes", 0) 
 
                         # Separar clave y nombre
                         if " - " in materia_nombre:
@@ -1441,13 +1445,24 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                             "Grupo": g.get("gpo", ""),
                             "Materia": nombre_mat,
                             "Profesor": profesor,
-                            "Salón": salon
+                            "Salón": salon,
+                            "Vacantes": vacantes  # <--- Aquí agregamos la columna nueva
                         })
 
                     df_resumen = pd.DataFrame(lista_resumen)
-                    df_resumen = df_resumen.sort_values(["Clave", "Grupo"], ascending=True)
+                    
+                    # Ordenamos por clave para que se vea limpio
+                    if not df_resumen.empty:
+                        df_resumen = df_resumen.sort_values(["Clave", "Grupo"], ascending=True)
 
-                    st.dataframe(df_resumen, width="stretch", height=420)
+                    # Mostramos la tabla (usamos st.dataframe para que sea interactiva)
+                    st.dataframe(
+                        df_resumen, 
+                        width=None,   # Ajuste automático
+                        use_container_width=True, # Ocupar todo el ancho
+                        hide_index=True, # Ocultar el índice numérico (0,1,2...) para que se vea mejor
+                        height=420
+                    )
 
         else:
             st.warning(
