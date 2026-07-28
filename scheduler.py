@@ -86,11 +86,46 @@ def extraer_intervalos(horario_str, dias_lista):
             intervalos.append({"dia": dia, "inicio": inicio_min, "fin": fin_min})
     return intervalos
 
+MODALIDAD_PATRON = re.compile(
+    r"\((PRESENCIAL|EN\s*L[IÍ]NEA|ENLINEA|A\s*DISTANCIA|"
+    r"H[IÍ]BRID[AO]|REMOT[AO]|VIRTUAL)\)",
+    flags=re.IGNORECASE,
+)
+
+
+def normalizar_modalidad_texto(modalidad):
+    """Devuelve una etiqueta uniforme para la modalidad publicada."""
+    if not modalidad:
+        return None
+
+    texto = str(modalidad).strip().upper()
+    texto_sin_acentos = unicodedata.normalize("NFD", texto)
+    texto_sin_acentos = "".join(
+        ch for ch in texto_sin_acentos
+        if unicodedata.category(ch) != "Mn"
+    )
+    texto_sin_acentos = re.sub(r"\s+", " ", texto_sin_acentos)
+
+    if texto_sin_acentos in {"EN LINEA", "ENLINEA", "VIRTUAL", "REMOTO", "REMOTA"}:
+        return "EN LÍNEA"
+    if texto_sin_acentos in {"HIBRIDO", "HIBRIDA"}:
+        return "HÍBRIDA"
+    if texto_sin_acentos == "A DISTANCIA":
+        return "A DISTANCIA"
+    if texto_sin_acentos == "PRESENCIAL":
+        return "PRESENCIAL"
+    return texto
+
+
 def limpiar_nombre_profesor(nombre):
     if not nombre:
         return ""
-    n = nombre.replace("(PRESENCIAL)", "").replace("\n", " ").strip()
-    n = re.sub(r"\s+", " ", n)
+
+    # La modalidad forma parte de la información del grupo, no del nombre.
+    n = str(nombre).replace("\n", " ").strip()
+    n = MODALIDAD_PATRON.sub(" ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+
     prefijos = [
         "M. EN I.", "M EN I.", "M.I.", "MI.", "M I.",
         "DR.", "DRA.", "MTRO.", "MTRA.", "LIC.", "ING.", "ISC.",
@@ -101,19 +136,23 @@ def limpiar_nombre_profesor(nombre):
         if upper_n.startswith(p):
             n = n[len(p):].strip()
             break
+
     n = n.replace(".", " ")
     n = unicodedata.normalize("NFD", n)
     n = "".join(ch for ch in n if unicodedata.category(ch) != "Mn")
     n = re.sub(r"\s+", " ", n).strip()
     return n
 
+
 def link_busqueda_google_profesor(nombre_profesor):
-    """Genera una búsqueda pública del profesor en Google."""
+    """Genera una búsqueda flexible del profesor en Google."""
     nombre_limpio = limpiar_nombre_profesor(nombre_profesor)
     if not nombre_limpio:
         return None
+
+    # Sin comillas: Google puede tolerar variaciones de nombres y apellidos.
     consulta = urllib.parse.quote_plus(
-        f'"{nombre_limpio}" Facultad de Ingeniería UNAM profesor'
+        f"{nombre_limpio} Facultad de Ingeniería UNAM profesor"
     )
     return f"https://www.google.com/search?q={consulta}"
 
@@ -718,8 +757,12 @@ def _entero_desde_texto(valor):
 
 def _datos_profesor(profesor_raw):
     profesor_raw = re.sub(r"\s+", " ", str(profesor_raw or "")).strip()
-    match_modalidad = re.search(r"\(([^)]+)\)", profesor_raw)
-    modalidad = match_modalidad.group(1).strip().upper() if match_modalidad else None
+    match_modalidad = MODALIDAD_PATRON.search(profesor_raw)
+    modalidad = (
+        normalizar_modalidad_texto(match_modalidad.group(1))
+        if match_modalidad
+        else None
+    )
     profesor = limpiar_nombre_profesor(profesor_raw)
     return profesor, modalidad, profesor_raw
 
@@ -1244,12 +1287,18 @@ with col_in:
     
     st.caption("Inicia aquí ingresando tus claves y presiona **Agregar Materias**.")
     
-    clave_input = st.text_input(
-        "## Claves:",
-        placeholder="Ejemplo: 1730 ó 1120, 1601, 32"
-    )
+    # Un formulario permite agregar las claves tanto con el botón como con Enter.
+    with st.form("form_agregar_materias", clear_on_submit=True):
+        clave_input = st.text_input(
+            "## Claves:",
+            placeholder="Ejemplo: 1730 ó 1120, 1601, 32"
+        )
+        agregar_materias = st.form_submit_button(
+            "Agregar Materias",
+            width="stretch",
+        )
 
-    if st.button("Agregar Materias", width="stretch"):
+    if agregar_materias:
         lista_claves = [c.strip() for c in clave_input.split(',') if c.strip()]
 
         if not lista_claves:
@@ -1702,17 +1751,42 @@ with col_list:
                 else:
                     color_vac = "gray"
                 salon = g.get("salon", None)
+                modalidad = normalizar_modalidad_texto(g.get("modalidad"))
+                if not modalidad:
+                    _, modalidad_inferida, _ = _datos_profesor(
+                        g.get("profesor_raw") or g.get("profesor", "")
+                    )
+                    modalidad = modalidad_inferida
+                    if modalidad:
+                        st.session_state.materias_db[i]["grupos"][j]["modalidad"] = modalidad
+
+                # Limpia también datos restaurados desde respaldos de versiones anteriores.
+                profesor_mostrado = limpiar_nombre_profesor(g.get("profesor", ""))
+                if profesor_mostrado:
+                    st.session_state.materias_db[i]["grupos"][j]["profesor"] = profesor_mostrado
 
                 salon_txt = ""
-                if salon and salon.strip().upper() != "SIN":
-                    salon_txt = f" <span style='color:#555;'>(Salón: <strong>{salon}</strong>)</span>"
-                elif not salon or str(salon).strip().upper() == "SIN":
+                modalidad_legible = modalidad.title() if modalidad else None
+
+                if salon and str(salon).strip().upper() != "SIN":
+                    contenido_salon = f"Salón: <strong>{salon}</strong>"
+                    if modalidad_legible:
+                        contenido_salon += f" · {modalidad_legible}"
+                    salon_txt = f" <span style='color:#555;'>({contenido_salon})</span>"
+                elif modalidad == "EN LÍNEA":
+                    salon_txt = " <span style='color:#777;'>(En línea)</span>"
+                elif modalidad_legible:
+                    salon_txt = (
+                        " <span style='color:#777;'>"
+                        f"(Salón no publicado · {modalidad_legible})</span>"
+                    )
+                else:
                     salon_txt = " <span style='color:#777;'>(Salón no publicado)</span>"
 
 
                 info_html = f"""
                 <div style="font-size: 0.9em;">
-                    <strong>Gpo {g['gpo']}</strong> - {g['profesor']}{salon_txt}<br>
+                    <strong>Gpo {g['gpo']}</strong> - {profesor_mostrado or g['profesor']}{salon_txt}<br>
                     📅 {g['dias']} ({g['horario']})<br>
                     Cupo publicado: <strong style='color: {color_vac}'>{vacs if vacs is not None else "N/D"}</strong><br>
                     {sug_txt}
@@ -1730,7 +1804,7 @@ with col_list:
                         "Calif.",
                         min_value=0.0,
                         max_value=10.0,
-                        step=0.01,
+                        step=1.0,
                         format="%.2f",
                         key=key_widget,
                         label_visibility="collapsed"
@@ -1740,7 +1814,7 @@ with col_list:
 
                     st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
 
-                    profesor_actual = g.get("profesor", "")
+                    profesor_actual = limpiar_nombre_profesor(g.get("profesor", ""))
                     if profesor_actual not in {"", "Tú", "SIN PROFESOR PUBLICADO"}:
                         link_google = link_busqueda_google_profesor(profesor_actual)
                         if link_google:
