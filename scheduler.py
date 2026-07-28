@@ -475,7 +475,7 @@ def consultar_ingenieria_tracker(nombre_profesor):
 
 def refrescar_vacantes():
     n_actualizados = 0
-    with st.spinner("Actualizando cupos en tiempo real..."):
+    with st.spinner("Actualizando cupos y vacantes en tiempo real..."):
         for materia in st.session_state.materias_db:
             if materia.get("es_bloqueo", False):
                 continue
@@ -496,6 +496,11 @@ def refrescar_vacantes():
                         if g_nuevo.get("gpo") == g_viejo.get("gpo"):
                             g_viejo["cupo"] = g_nuevo.get("cupo", g_viejo.get("cupo"))
                             g_viejo["vacantes"] = g_nuevo.get("vacantes", g_viejo.get("vacantes"))
+                            g_viejo["sin_vacantes"] = bool(
+                                g_viejo.get("vacantes") is not None
+                                and g_viejo.get("vacantes") <= 0
+                            )
+                            g_viejo["dato_publicado"] = "cupo_y_vacantes"
                             g_viejo["horario"] = g_nuevo.get("horario", g_viejo.get("horario", ""))
                             g_viejo["dias"] = g_nuevo.get("dias", g_viejo.get("dias", ""))
                             g_viejo["intervalos"] = g_nuevo.get("intervalos", g_viejo.get("intervalos", []))
@@ -503,7 +508,7 @@ def refrescar_vacantes():
                             n_actualizados += 1
                             break
 
-    st.success(f"Se actualizaron {n_actualizados} grupos.")
+    st.success(f"Se actualizaron cupos y vacantes de {n_actualizados} grupos.")
 
 def calcular_penalizacion_por_dia(opcion, config_dias, w_dias=35):
     """
@@ -767,8 +772,9 @@ def _datos_profesor(profesor_raw):
     return profesor, modalidad, profesor_raw
 
 
-def _crear_grupo_base(gpo, profesor_raw, cupo, nombre_materia):
+def _crear_grupo_base(gpo, profesor_raw, cupo, vacantes, nombre_materia):
     profesor, modalidad, profesor_raw = _datos_profesor(profesor_raw)
+    sin_vacantes = vacantes is not None and vacantes <= 0
     return {
         "gpo": str(gpo).strip(),
         "profesor": profesor or "SIN PROFESOR PUBLICADO",
@@ -781,11 +787,13 @@ def _crear_grupo_base(gpo, profesor_raw, cupo, nombre_materia):
         "componentes": [],
         "calificacion": 10,
         "materia_nombre": nombre_materia,
-        # La página actual publica Cupo, no número exacto de vacantes.
+        # La página oficial publica ambos valores por separado.
         "cupo": cupo,
-        "vacantes": cupo,  # alias temporal para no romper versiones guardadas
-        "dato_publicado": "cupo",
-        "activo": True,
+        "vacantes": vacantes,
+        "dato_publicado": "cupo_y_vacantes",
+        "sin_vacantes": sin_vacantes,
+        # Los grupos llenos siguen visibles, pero comienzan desmarcados.
+        "activo": not sin_vacantes,
         "api_consultado": False,
         "sugerencia_api": None,
         "api_num_resenas": None,
@@ -854,12 +862,19 @@ def parsear_grupos_desde_tablas(soup, clave_int, nombre_materia):
             dias_str = str(fila[indices["dias"]]).strip()
             tipo = fila[indices["tipo"]] if "tipo" in indices else "Clase"
             cupo = _entero_desde_texto(fila[indices["cupo"]]) if "cupo" in indices else None
+            vacantes = (
+                _entero_desde_texto(fila[indices["vacantes"]])
+                if "vacantes" in indices
+                else None
+            )
 
             if not gpo or not horario or not dias_str:
                 continue
 
             if gpo not in grupos:
-                grupos[gpo] = _crear_grupo_base(gpo, profesor_raw, cupo, nombre_materia)
+                grupos[gpo] = _crear_grupo_base(
+                    gpo, profesor_raw, cupo, vacantes, nombre_materia
+                )
             else:
                 if not grupos[gpo].get("profesor_raw") and profesor_raw:
                     profesor, modalidad, profesor_raw = _datos_profesor(profesor_raw)
@@ -870,7 +885,9 @@ def parsear_grupos_desde_tablas(soup, clave_int, nombre_materia):
                     })
                 if cupo is not None:
                     grupos[gpo]["cupo"] = cupo
-                    grupos[gpo]["vacantes"] = cupo
+                if vacantes is not None:
+                    grupos[gpo]["vacantes"] = vacantes
+                    grupos[gpo]["sin_vacantes"] = vacantes <= 0
 
             _agregar_componente(grupos[gpo], tipo, horario, dias_str)
 
@@ -882,20 +899,27 @@ def parsear_grupos_desde_texto(soup, nombre_materia):
     texto = soup.get_text("\n", strip=True)
     grupos = {}
     patron_grupo = re.compile(
-        r"Gpo\.?\s*:\s*([^,\n]+)\s*,\s*Cupo\s*:\s*(\d+)\s*(.*?)"
+        r"Gpo\.?\s*:\s*([^,\n]+)\s*,\s*Cupo\s*:\s*(\d+)"
+        r"(?:\s*,\s*Vacantes\s*:\s*(\d+))?\s*(.*?)"
         r"(?=Gpo\.?\s*:|Horario\s+Actualizado|$)",
         flags=re.IGNORECASE | re.DOTALL,
     )
 
     for match in patron_grupo.finditer(texto):
-        gpo, cupo_txt, bloque = match.groups()
+        gpo, cupo_txt, vacantes_txt, bloque = match.groups()
         prof_match = re.search(
             r"Profesor\s*:\s*(.*?)(?=\n\s*Tipo\s*:)",
             bloque,
             flags=re.IGNORECASE | re.DOTALL,
         )
         profesor_raw = prof_match.group(1).strip() if prof_match else ""
-        grupo = _crear_grupo_base(gpo, profesor_raw, int(cupo_txt), nombre_materia)
+        grupo = _crear_grupo_base(
+            gpo,
+            profesor_raw,
+            int(cupo_txt),
+            int(vacantes_txt) if vacantes_txt is not None else None,
+            nombre_materia,
+        )
 
         patron_componente = re.compile(
             r"Tipo\s*:\s*([^\n]+).*?Horario\s*:\s*([^\n]+).*?D[ií]as\s*:\s*([^\n]+)",
@@ -1043,7 +1067,8 @@ def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI 
         salon = g.get("salon", "SIN")
         horario = g.get("horario", "")
         dias = g.get("dias", "")
-        vacantes = g.get("cupo", g.get("vacantes", ""))
+        cupo = g.get("cupo", "")
+        vacantes = g.get("vacantes", "")
 
         if salon and str(salon).strip().upper() != "SIN":
             summary = f"{materia_nombre} | GPO {g.get('gpo','')} | {salon}"
@@ -1061,6 +1086,7 @@ def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI 
             desc += f"\\nSalón: SIN / En línea"
 
         desc += f"\\nHorario: {dias} {horario}"
+        desc += f"\\nCupo: {cupo}"
         desc += f"\\nVacantes: {vacantes}"
 
         for s in g.get("intervalos", []):
@@ -1248,9 +1274,9 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej. `1730` o `1120, 1601, 32`) y presiona **Agregar Materias**.
 
     **3. Revisa Grupos y Cupos:**
-    En la lista de la derecha verás los grupos publicados y su cupo total.
+    En la lista de la derecha verás el cupo total y las vacantes restantes de cada grupo.
     * **Desmarca la casilla** ☑️ de los grupos que no te interesen para que el generador los ignore.
-    * Usa **🔄 Refrescar Cupos** para actualizar el cupo publicado y los horarios sin borrar tus materias.
+    * Usa **🔄 Refrescar vacantes** para actualizar cupo, vacantes y horarios sin borrar tus materias.
 
     **4. Consulta Promedios de Profesores:**
     Dentro de cada materia, presiona **🔍 Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
@@ -1643,7 +1669,7 @@ with col_list:
 
     c_header_1.subheader("2. Materias Registradas")
 
-    if c_header_2.button("🔄 Refrescar Cupos", use_container_width=True):
+    if c_header_2.button("🔄 Refrescar vacantes", use_container_width=True):
         refrescar_vacantes()
         st.rerun()
 
@@ -1714,9 +1740,13 @@ with col_list:
 
                 st.session_state.materias_db[i]['grupos'][j]['activo'] = activo
 
-                vacs = g.get("cupo", g.get("vacantes"))
-                if isinstance(vacs, (int, float)):
-                    color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+                cupo_grupo = g.get("cupo")
+                vacantes_grupo = g.get("vacantes")
+                if isinstance(vacantes_grupo, (int, float)):
+                    color_vac = (
+                        "green" if vacantes_grupo > 5
+                        else ("orange" if vacantes_grupo > 0 else "red")
+                    )
                 else:
                     color_vac = "gray"
                 sug = g.get("sugerencia_api", None)
@@ -1745,11 +1775,6 @@ with col_list:
                     else:
                         sug_txt = "<span style='color:gray;'>⭐ Sugerencia Calificacion: No encontrado</span>"
 
-                vacs = g.get("cupo", g.get("vacantes"))
-                if isinstance(vacs, (int, float)):
-                    color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
-                else:
-                    color_vac = "gray"
                 salon = g.get("salon", None)
                 modalidad = normalizar_modalidad_texto(g.get("modalidad"))
                 if not modalidad:
@@ -1784,11 +1809,20 @@ with col_list:
                     salon_txt = " <span style='color:#777;'>(Salón no publicado)</span>"
 
 
+                estado_vacantes = ""
+                if isinstance(vacantes_grupo, (int, float)) and vacantes_grupo <= 0:
+                    estado_vacantes = (
+                        " <strong style='color:#d32f2f;'>⚠️ Sin vacantes</strong>"
+                        " <span style='color:gray;'>(puedes incluirlo manualmente)</span>"
+                    )
+
                 info_html = f"""
                 <div style="font-size: 0.9em;">
                     <strong>Gpo {g['gpo']}</strong> - {profesor_mostrado or g['profesor']}{salon_txt}<br>
                     📅 {g['dias']} ({g['horario']})<br>
-                    Cupo publicado: <strong style='color: {color_vac}'>{vacs if vacs is not None else "N/D"}</strong><br>
+                    Cupo: <strong>{cupo_grupo if cupo_grupo is not None else "N/D"}</strong>
+                    · Vacantes: <strong style='color: {color_vac}'>{vacantes_grupo if vacantes_grupo is not None else "N/D"}</strong>
+                    {estado_vacantes}<br>
                     {sug_txt}
                 </div>
                 """
@@ -1849,10 +1883,16 @@ st.caption(
 # ============================
 c_vis1, c_vis2 = st.columns([1, 1])
 
-mostrar_sin_cupo = False
-c_vis1.caption(
-    "La fuente actual publica el cupo total del grupo, no el número exacto de vacantes; "
-    "por eso ya no se marca automáticamente ‘SIN CUPO’."
+mostrar_sin_cupo = c_vis1.toggle(
+    "Mostrar ⚠️ SIN VACANTES en el horario",
+    value=True,
+    help=(
+        "Los grupos con cero vacantes siguen disponibles para seleccionarlos, "
+        "pero se marcan con borde rojo y una advertencia."
+    ),
+)
+c_vis2.caption(
+    "Los grupos sin vacantes aparecen desmarcados al cargarlos, pero puedes activarlos manualmente."
 )
 
 if st.button("Generar combinaciones optimizadas", width="stretch"):
@@ -1973,6 +2013,22 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                 with tab:
                     opcion = posibles[i]
 
+                    grupos_sin_vacantes = [
+                        g for g in opcion["materias"]
+                        if g.get("gpo") != "N/A"
+                        and g.get("vacantes") is not None
+                        and g.get("vacantes") <= 0
+                    ]
+                    if grupos_sin_vacantes:
+                        detalle_sin_vacantes = ", ".join(
+                            f"{g.get('materia_nombre', 'Materia')} · Gpo {g.get('gpo', '')}"
+                            for g in grupos_sin_vacantes
+                        )
+                        st.warning(
+                            "⚠️ Esta opción incluye grupos sin vacantes actuales: "
+                            + detalle_sin_vacantes
+                        )
+
                     # ============================
                     # HEADER COMPACTO + EXPORT
                     # ============================
@@ -2049,14 +2105,14 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                         profesor_corto = m_g['profesor'].split('\n')[0][:18]
                         salon = m_g.get("salon", "SIN")
                         salon = salon.strip() if salon else "SIN"
-                        vacs_grupo = None  # la fuente actual publica cupo total, no vacantes exactas
+                        vacs_grupo = m_g.get("vacantes")
                         sin_cupo = False
                         try:
                             if vacs_grupo is not None and int(vacs_grupo) <= 0:
                                 sin_cupo = True
-                        except:
+                        except (TypeError, ValueError):
                             sin_cupo = False
-                        tag_cupo = " ⚠️SIN CUPO" if (sin_cupo and mostrar_sin_cupo) else ""
+                        tag_cupo = " ⚠️SIN VACANTES" if (sin_cupo and mostrar_sin_cupo) else ""
                         for s in m_g['intervalos']:
                             h_i = f"{s['inicio']//60:02d}:{'30' if (s['inicio']%60 >= 30) else '00'}"
                             h_f = f"{s['fin']//60:02d}:{'30' if (s['fin']%60 >= 30) else '00'}"
@@ -2147,8 +2203,13 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                         profesor = g.get("profesor", "")
                         salon = g.get("salon", "SIN")
                         
-                        # Extraemos el cupo total publicado por la Facultad
-                        vacantes = g.get("cupo", g.get("vacantes")) 
+                        cupo = g.get("cupo")
+                        vacantes = g.get("vacantes")
+                        estado_vacantes = (
+                            "Sin vacantes"
+                            if vacantes is not None and vacantes <= 0
+                            else "Disponible" if vacantes is not None else "No disponible"
+                        )
 
                         # Separar clave y nombre
                         if " - " in materia_nombre:
@@ -2162,7 +2223,9 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                             "Materia": nombre_mat,
                             "Profesor": profesor,
                             "Salón": salon,
-                            "Cupo publicado": vacantes
+                            "Cupo": cupo,
+                            "Vacantes": vacantes,
+                            "Estado": estado_vacantes,
                         })
 
                     df_resumen = pd.DataFrame(lista_resumen)
