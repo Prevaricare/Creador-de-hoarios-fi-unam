@@ -13,6 +13,14 @@ import io
 import matplotlib.pyplot as plt
 import urllib.parse
 import unicodedata
+import json
+import copy
+import time
+
+try:
+    from streamlit_local_storage import LocalStorage
+except ImportError:
+    LocalStorage = None
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Generador de Horarios", layout="wide")
@@ -99,6 +107,288 @@ def limpiar_nombre_profesor(nombre):
     n = re.sub(r"\s+", " ", n).strip()
     return n
 
+def link_busqueda_google_profesor(nombre_profesor):
+    """Genera una búsqueda pública del profesor en Google."""
+    nombre_limpio = limpiar_nombre_profesor(nombre_profesor)
+    if not nombre_limpio:
+        return None
+    consulta = urllib.parse.quote_plus(
+        f'"{nombre_limpio}" Facultad de Ingeniería UNAM profesor'
+    )
+    return f"https://www.google.com/search?q={consulta}"
+
+
+def coincidencia_profesor(nombre_original, nombre_api):
+    """Clasifica de forma conservadora la coincidencia devuelta por la API."""
+    a = limpiar_nombre_profesor(nombre_original).upper()
+    b = limpiar_nombre_profesor(nombre_api).upper()
+    if not a or not b:
+        return "ninguna"
+    if a == b:
+        return "exacta"
+    tokens_a = set(a.split())
+    tokens_b = set(b.split())
+    if not tokens_a or not tokens_b:
+        return "ninguna"
+    similitud = len(tokens_a & tokens_b) / max(len(tokens_a), len(tokens_b))
+    return "probable" if similitud >= 0.75 else "dudosa"
+
+
+def actualizar_calificaciones_automaticamente(indice_materia=None):
+    """Consulta IngenieríaTracker y aplica solo coincidencias exactas/probables."""
+    encontrados = 0
+    aplicados = 0
+    dudosos = 0
+    no_encontrados = 0
+
+    indices = range(len(st.session_state.materias_db))
+    if indice_materia is not None:
+        indices = [indice_materia]
+
+    for i in indices:
+        materia = st.session_state.materias_db[i]
+        if materia.get("es_bloqueo"):
+            continue
+        for j, grupo in enumerate(materia.get("grupos", [])):
+            profesor = grupo.get("profesor", "")
+            if grupo.get("gpo") == "N/A" or profesor in {"", "Tú", "SIN PROFESOR PUBLICADO"}:
+                continue
+
+            nombre_limpio = limpiar_nombre_profesor(profesor)
+            if nombre_limpio in st.session_state.api_cache_profes:
+                resultado = st.session_state.api_cache_profes[nombre_limpio]
+            else:
+                resultado = consultar_ingenieria_tracker(profesor)
+                st.session_state.api_cache_profes[nombre_limpio] = resultado
+
+            promedio = resultado.get("promedio")
+            nombre_api = resultado.get("nombre_api")
+            nivel = coincidencia_profesor(profesor, nombre_api)
+            destino = st.session_state.materias_db[i]["grupos"][j]
+            destino["api_consultado"] = True
+            destino["sugerencia_api"] = promedio
+            destino["api_num_resenas"] = resultado.get("num_resenas")
+            destino["api_nombre_match"] = nombre_api
+            destino["api_coincidencia"] = nivel
+
+            if promedio is None:
+                no_encontrados += 1
+                continue
+
+            encontrados += 1
+            if nivel in {"exacta", "probable"}:
+                try:
+                    valor = round(float(promedio), 2)
+                    destino["calificacion"] = valor
+                    widget_key = f"cal_{i}_{j}"
+                    if widget_key in st.session_state:
+                        st.session_state[widget_key] = valor
+                    aplicados += 1
+                except (TypeError, ValueError):
+                    dudosos += 1
+            else:
+                dudosos += 1
+
+    return {
+        "encontrados": encontrados,
+        "aplicados": aplicados,
+        "dudosos": dudosos,
+        "no_encontrados": no_encontrados,
+    }
+
+
+STORAGE_KEY = "horarios_fi_unam_estado_v3"
+ESTADO_VERSION = 4
+DIAS_SEMANA = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"]
+
+
+def crear_estado_guardable():
+    """Crea un JSON compacto y portable con el estado relevante."""
+    materias = []
+    bloqueos = []
+    for materia in st.session_state.get("materias_db", []):
+        if materia.get("es_bloqueo"):
+            bloqueos.append(copy.deepcopy(materia))
+            continue
+        clave = str(materia.get("materia", "")).split(" - ")[0].strip()
+        grupos = []
+        for g in materia.get("grupos", []):
+            grupos.append({
+                "gpo": str(g.get("gpo", "")),
+                "activo": bool(g.get("activo", True)),
+                "calificacion": g.get("calificacion", 10),
+                "sugerencia_api": g.get("sugerencia_api"),
+                "api_num_resenas": g.get("api_num_resenas"),
+                "api_nombre_match": g.get("api_nombre_match"),
+                "api_coincidencia": g.get("api_coincidencia"),
+            })
+        materias.append({
+            "clave": clave,
+            "obligatoria": bool(materia.get("obligatoria", True)),
+            "grupos": grupos,
+        })
+
+    return {
+        "version": ESTADO_VERSION,
+        "guardado_en": datetime.now(timezone.utc).isoformat(),
+        "materias": materias,
+        "bloqueos": bloqueos,
+        "preferencias": {
+            "tipo_turno": st.session_state.get("tipo_turno_guardado", "Mixto"),
+            "w_turno": st.session_state.get("w_turno_guardado", 30),
+            "w_huecos": st.session_state.get("w_huecos_guardado", 50),
+            "w_profes": st.session_state.get("w_profes_guardado", 70),
+            "w_carga": st.session_state.get("w_carga_guardado", 80),
+            "w_dias": st.session_state.get("w_dias_guardado", 35),
+            "config_dias": copy.deepcopy(st.session_state.get("config_dias", {})),
+        },
+    }
+
+
+
+def firma_estado_guardable():
+    """Serializa el estado sin fecha para detectar cambios reales."""
+    estado = crear_estado_guardable()
+    estado.pop("guardado_en", None)
+    return json.dumps(
+        estado,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def sincronizar_widgets_desde_estado():
+    """Hace que los widgets visuales reflejen el estado recién restaurado."""
+    # Limpiar claves dinámicas antiguas para evitar que otra materia herede valores.
+    prefijos_dinamicos = (
+        "tgl_", "cal_", "radio_tipo_",
+        "modo_", "pref_", "maxb_", "ev_",
+    )
+    claves_exactas = {
+        "pref_tipo_turno_widget",
+        "pref_w_turno_widget",
+        "pref_w_huecos_widget",
+        "pref_w_profes_widget",
+        "pref_w_carga_widget",
+        "pref_w_dias_widget",
+    }
+    for clave in list(st.session_state.keys()):
+        if clave in claves_exactas or clave.startswith(prefijos_dinamicos):
+            del st.session_state[clave]
+
+    st.session_state["pref_tipo_turno_widget"] = st.session_state.get(
+        "tipo_turno_guardado", "Mixto"
+    )
+    st.session_state["pref_w_turno_widget"] = int(
+        st.session_state.get("w_turno_guardado", 30)
+    )
+    st.session_state["pref_w_huecos_widget"] = int(
+        st.session_state.get("w_huecos_guardado", 50)
+    )
+    st.session_state["pref_w_profes_widget"] = int(
+        st.session_state.get("w_profes_guardado", 70)
+    )
+    st.session_state["pref_w_carga_widget"] = int(
+        st.session_state.get("w_carga_guardado", 80)
+    )
+    st.session_state["pref_w_dias_widget"] = int(
+        st.session_state.get("w_dias_guardado", 35)
+    )
+
+    for dia in DIAS_SEMANA:
+        cfg = st.session_state.get("config_dias", {}).get(dia, {})
+        st.session_state[f"modo_{dia}"] = cfg.get("modo", "Normal")
+        st.session_state[f"pref_{dia}"] = cfg.get("preferencia", "Mixto")
+        st.session_state[f"maxb_{dia}"] = int(cfg.get("max_bloques", 10))
+        st.session_state[f"ev_{dia}"] = bool(cfg.get("evitar", False))
+
+    for i, materia in enumerate(st.session_state.get("materias_db", [])):
+        st.session_state[f"radio_tipo_{i}"] = (
+            "Obligatorio" if materia.get("obligatoria", True) else "Opcional"
+        )
+        for j, grupo in enumerate(materia.get("grupos", [])):
+            st.session_state[f"tgl_{i}_{j}"] = bool(grupo.get("activo", True))
+            if grupo.get("profesor") != "Tú":
+                try:
+                    st.session_state[f"cal_{i}_{j}"] = round(
+                        float(grupo.get("calificacion", 10)), 2
+                    )
+                except (TypeError, ValueError):
+                    st.session_state[f"cal_{i}_{j}"] = 10.0
+
+
+def reiniciar_estado_usuario():
+    """Limpia materias y preferencias restaurables sin tocar cachés técnicas."""
+    st.session_state.materias_db = []
+    st.session_state.tipo_turno_guardado = "Mixto"
+    st.session_state.w_turno_guardado = 30
+    st.session_state.w_huecos_guardado = 50
+    st.session_state.w_profes_guardado = 70
+    st.session_state.w_carga_guardado = 80
+    st.session_state.w_dias_guardado = 35
+    st.session_state.config_dias = {
+        dia: {
+            "modo": "Normal",
+            "preferencia": "Mixto",
+            "max_bloques": 10,
+            "evitar": False,
+        }
+        for dia in DIAS_SEMANA
+    }
+    sincronizar_widgets_desde_estado()
+
+
+def restaurar_estado_guardado(estado):
+    """Recarga claves actuales desde la UNAM y reaplica selecciones guardadas."""
+    if isinstance(estado, str):
+        estado = json.loads(estado)
+    if not isinstance(estado, dict):
+        raise ValueError("El respaldo no contiene un objeto válido.")
+
+    nuevas_materias = []
+    errores = []
+    for item in estado.get("materias", []):
+        clave = str(item.get("clave", "")).strip()
+        if not clave.isdigit():
+            continue
+        cargadas = obtener_datos_unam(clave, bool(item.get("obligatoria", True)))
+        if not cargadas:
+            errores.append(clave)
+            continue
+        materia = cargadas[0]
+        guardados = {str(g.get("gpo")): g for g in item.get("grupos", [])}
+        for grupo in materia.get("grupos", []):
+            previo = guardados.get(str(grupo.get("gpo")))
+            if previo:
+                grupo["activo"] = bool(previo.get("activo", True))
+                try:
+                    grupo["calificacion"] = round(float(previo.get("calificacion", 10)), 2)
+                except (TypeError, ValueError):
+                    grupo["calificacion"] = 10
+                for campo in ["sugerencia_api", "api_num_resenas", "api_nombre_match", "api_coincidencia"]:
+                    grupo[campo] = previo.get(campo)
+                grupo["api_consultado"] = previo.get("sugerencia_api") is not None
+        nuevas_materias.append(materia)
+
+    nuevas_materias.extend(copy.deepcopy(estado.get("bloqueos", [])))
+    st.session_state.materias_db = nuevas_materias
+
+    pref = estado.get("preferencias", {})
+    for nombre, predeterminado in [
+        ("tipo_turno_guardado", "Mixto"), ("w_turno_guardado", 30),
+        ("w_huecos_guardado", 50), ("w_profes_guardado", 70),
+        ("w_carga_guardado", 80), ("w_dias_guardado", 35),
+    ]:
+        origen = nombre.replace("_guardado", "")
+        st.session_state[nombre] = pref.get(origen, predeterminado)
+    if isinstance(pref.get("config_dias"), dict) and pref["config_dias"]:
+        st.session_state.config_dias = pref["config_dias"]
+
+    sincronizar_widgets_desde_estado()
+    return errores
+
+
 def link_profesor_ingenieriatracker(nombre_profesor):
     """
     Genera el link directo al perfil del profesor en IngenieriaTracker.
@@ -176,88 +466,6 @@ def refrescar_vacantes():
 
     st.success(f"Se actualizaron {n_actualizados} grupos.")
 
-def cargar_grupos_actuales(texto_grupos, es_obligatorio=True):
-    """
-    Formato esperado (una línea por grupo):
-        1601 2
-        1120 3
-        1730 1
-
-    Agrega materias faltantes y deja activo solo el grupo indicado.
-    """
-    if not texto_grupos.strip():
-        st.warning("No pegaste nada.")
-        return
-
-    lineas = [ln.strip() for ln in texto_grupos.split("\n") if ln.strip()]
-    if not lineas:
-        st.warning("No se detectaron líneas válidas.")
-        return
-
-    cargadas = 0
-    actualizadas = 0
-    errores = []
-
-    for ln in lineas:
-        # Acepta: "1601 2" o "1601-2" o "1601:2"
-        ln_norm = ln.replace("-", " ").replace(":", " ")
-        partes = [p for p in ln_norm.split() if p.strip()]
-
-        if len(partes) < 2:
-            errores.append(f"Formato inválido: '{ln}' (usa: 1601 2)")
-            continue
-
-        clave = partes[0].strip()
-        gpo_obj = partes[1].strip()
-
-        if not clave.isdigit():
-            errores.append(f"Clave inválida: '{clave}' en '{ln}'")
-            continue
-
-        # Buscar si la materia ya existe
-        idx_materia = None
-        for i, mat in enumerate(st.session_state.materias_db):
-            clave_mat = str(mat.get("materia", "")).split(" - ")[0].strip()
-            if clave_mat == str(int(clave)):
-                idx_materia = i
-                break
-
-        # Si no existe, cargarla desde UNAM
-        if idx_materia is None:
-            nuevas = obtener_datos_unam(str(int(clave)), es_obligatorio)
-            if not nuevas:
-                errores.append(f"No se pudo cargar la clave {clave}")
-                continue
-            st.session_state.materias_db.extend(nuevas)
-            idx_materia = len(st.session_state.materias_db) - 1
-            cargadas += 1
-
-        # Activar solo el grupo indicado
-        materia = st.session_state.materias_db[idx_materia]
-        encontrado = False
-
-        for j, g in enumerate(materia["grupos"]):
-            if str(g.get("gpo", "")).strip() == str(gpo_obj):
-                st.session_state.materias_db[idx_materia]["grupos"][j]["activo"] = True
-                encontrado = True
-            else:
-                st.session_state.materias_db[idx_materia]["grupos"][j]["activo"] = False
-
-        if encontrado:
-            actualizadas += 1
-        else:
-            errores.append(f"En clave {clave} no existe el grupo {gpo_obj}")
-
-    if cargadas > 0:
-        st.success(f" Materias cargadas automáticamente: {cargadas}")
-
-    if actualizadas > 0:
-        st.success(f" Grupos activados correctamente: {actualizadas}")
-
-    if errores:
-        st.warning(" Algunos datos no se pudieron aplicar:")
-        for e in errores:
-            st.write(f"- {e}")
 def calcular_penalizacion_por_dia(opcion, config_dias, w_dias=35):
     """
     Penaliza/bonifica una opción de horario según configuración avanzada por día.
@@ -887,12 +1095,102 @@ def dataframe_a_png(df_text, df_color=None):
 
 # --- INTERFAZ DE USUARIO ---
 st.title("Generador de Horarios FI")
-st.caption("Versión corregida: parser UNAM con teoría/laboratorio agrupados")
+st.caption("Versión 4.1: recuperación y guardado automático en el navegador")
 
-if 'materias_db' not in st.session_state:
+if "materias_db" not in st.session_state:
     st.session_state.materias_db = []
 if "api_cache_profes" not in st.session_state:
     st.session_state.api_cache_profes = {}
+if "auto_restore_completado" not in st.session_state:
+    st.session_state.auto_restore_completado = False
+if "auto_restore_intentos" not in st.session_state:
+    st.session_state.auto_restore_intentos = 0
+if "autoguardado_bloqueado" not in st.session_state:
+    st.session_state.autoguardado_bloqueado = False
+if "autoguardado_suspendido_una_vez" not in st.session_state:
+    st.session_state.autoguardado_suspendido_una_vez = False
+if "mensaje_restauracion" not in st.session_state:
+    st.session_state.mensaje_restauracion = None
+
+local_storage = LocalStorage() if LocalStorage is not None else None
+
+# Acciones solicitadas desde widgets en el rerun anterior. Se aplican aquí,
+# antes de crear cualquier widget, para que Streamlit permita sincronizar sus claves.
+if st.session_state.pop("_reinicio_usuario_pendiente", False):
+    reiniciar_estado_usuario()
+    st.session_state.autoguardado_bloqueado = False
+    st.session_state.auto_restore_completado = True
+    st.session_state.autoguardado_suspendido_una_vez = True
+    st.session_state._ultimo_estado_autoguardado = firma_estado_guardable()
+    st.session_state.mensaje_restauracion = "Progreso local borrado. Comenzaste desde cero."
+
+if "_estado_importado_pendiente" in st.session_state:
+    estado_importado_pendiente = st.session_state.pop("_estado_importado_pendiente")
+    try:
+        errores_importacion = restaurar_estado_guardado(estado_importado_pendiente)
+        st.session_state.auto_restore_completado = True
+        st.session_state.autoguardado_bloqueado = bool(errores_importacion)
+        st.session_state._ultimo_estado_autoguardado = None
+        if errores_importacion:
+            st.session_state.mensaje_restauracion = (
+                "El respaldo se importó parcialmente. No se pudieron actualizar estas claves: "
+                + ", ".join(errores_importacion)
+                + ". El autoguardado quedó pausado para proteger el archivo local."
+            )
+        else:
+            st.session_state.mensaje_restauracion = (
+                "Respaldo importado y preparado para guardarse automáticamente."
+            )
+    except Exception as e:
+        st.session_state.auto_restore_completado = True
+        st.session_state.autoguardado_bloqueado = True
+        st.session_state.mensaje_restauracion = f"No se pudo importar el respaldo: {e}"
+
+# Leer el almacenamiento antes de construir widgets. El componente puede necesitar
+# dos renderizados para devolver el valor; durante ese tiempo no se sobrescribe nada.
+if local_storage is None:
+    st.session_state.auto_restore_completado = True
+elif not st.session_state.auto_restore_completado:
+    # streamlit-local-storage 0.0.25 acepta la clave del elemento
+    # como único argumento. No se debe pasar el parámetro `key=` de Streamlit.
+    valor_local_inicio = local_storage.getItem(STORAGE_KEY)
+    st.session_state.auto_restore_intentos += 1
+
+    if valor_local_inicio:
+        try:
+            errores_restauracion = restaurar_estado_guardado(valor_local_inicio)
+            st.session_state.auto_restore_completado = True
+            st.session_state.autoguardado_bloqueado = bool(errores_restauracion)
+            st.session_state._ultimo_estado_autoguardado = firma_estado_guardable()
+            if errores_restauracion:
+                st.session_state.mensaje_restauracion = (
+                    "Se recuperó el progreso, pero no se pudieron actualizar estas claves: "
+                    + ", ".join(errores_restauracion)
+                    + ". El autoguardado quedó pausado para no sobrescribir el respaldo."
+                )
+            else:
+                st.session_state.mensaje_restauracion = (
+                    "Progreso recuperado automáticamente de este navegador."
+                )
+            st.rerun()
+        except Exception as e:
+            st.session_state.auto_restore_completado = True
+            st.session_state.autoguardado_bloqueado = True
+            st.session_state.mensaje_restauracion = (
+                f"No se pudo recuperar el guardado local: {e}. "
+                "No se sobrescribirá hasta que borres o importes un respaldo."
+            )
+    elif st.session_state.auto_restore_intentos >= 2:
+        # Segunda ejecución sin valor: no había un progreso previo.
+        st.session_state.auto_restore_completado = True
+        st.session_state._ultimo_estado_autoguardado = firma_estado_guardable()
+
+if st.session_state.get("mensaje_restauracion"):
+    mensaje = st.session_state.pop("mensaje_restauracion")
+    if st.session_state.get("autoguardado_bloqueado"):
+        st.warning(mensaje)
+    else:
+        st.toast(mensaje, icon="💾")
 
 # --- GUÍA DE USO DETALLADA ---
 with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
@@ -921,7 +1219,7 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     **5. Personaliza:**
     * **Bloqueos:** Agrega tus horas de comida, trabajo o traslado en el panel izquierdo ("Actividad Manual").
     * **Pesos:** Ahora se ajustan en la **columna izquierda**, en la sección **"⚙️ Configuración de Pesos"** (evitar huecos, preferencia de turno, etc.).
-    * **Cargar grupos actuales (Experimental):** Puedes pegar tus grupos actuales en formato `CLAVE GRUPO` (uno por línea) para activar automáticamente solo esos grupos.
+    * **Guardado automático (Experimental):** Tus materias, grupos y preferencias se recuperan al abrir la app y se guardan después de cada cambio. El JSON es solo un respaldo opcional.
 
     **6. Genera:**
     Presiona el botón al final para ver las mejores combinaciones posibles.
@@ -1057,33 +1355,51 @@ with col_in:
     st.caption("Configura aqui las preferencias de tu horario")
     with st.expander("⚙️ Configuración de Pesos", expanded=True):
 
+        if "pref_tipo_turno_widget" not in st.session_state:
+            st.session_state.pref_tipo_turno_widget = st.session_state.get(
+                "tipo_turno_guardado", "Mixto"
+            )
+        if "pref_w_turno_widget" not in st.session_state:
+            st.session_state.pref_w_turno_widget = int(st.session_state.get("w_turno_guardado", 30))
+        if "pref_w_huecos_widget" not in st.session_state:
+            st.session_state.pref_w_huecos_widget = int(st.session_state.get("w_huecos_guardado", 50))
+        if "pref_w_profes_widget" not in st.session_state:
+            st.session_state.pref_w_profes_widget = int(st.session_state.get("w_profes_guardado", 70))
+        if "pref_w_carga_widget" not in st.session_state:
+            st.session_state.pref_w_carga_widget = int(st.session_state.get("w_carga_guardado", 80))
+
         tipo_turno = st.selectbox(
             "Preferencia de Turno",
             ["Mañana (Temprano)", "Tarde / Noche", "Mixto"],
+            key="pref_tipo_turno_widget",
             help="Elige en qué momento del día prefieres tomar clases."
         )
 
         w_turno = st.slider(
             "Importancia del Turno",
-            0, 100, 30,
+            0, 100,
+            key="pref_w_turno_widget",
             help="Qué tanto debe esforzarse el sistema por respetar tu preferencia de mañana o tarde."
         )
 
         w_huecos = st.slider(
             "Minimizar horas muertas",
-            0, 100, 50,
+            0, 100,
+            key="pref_w_huecos_widget",
             help="Busca juntar tus clases para que no tengas tiempos libres excesivos entre ellas."
         )
 
         w_profes = st.slider(
             "Calificación de profesores",
-            0, 100, 70,
+            0, 100,
+            key="pref_w_profes_widget",
             help="Da prioridad a los profesores con mayor calificación."
         )
 
         w_carga = st.slider(
             "Cantidad de materias",
-            0, 100, 80,
+            0, 100,
+            key="pref_w_carga_widget",
             help="Intenta inscribir el mayor número posible de materias de tu lista."
         )
 
@@ -1094,6 +1410,11 @@ with col_in:
             "peso_turno": w_turno,
             "carga": w_carga
         }
+        st.session_state.tipo_turno_guardado = tipo_turno
+        st.session_state.w_turno_guardado = w_turno
+        st.session_state.w_huecos_guardado = w_huecos
+        st.session_state.w_profes_guardado = w_profes
+        st.session_state.w_carga_guardado = w_carga
         # ==========================================================
         # CONFIGURACIÓN AVANZADA POR DÍA (EXPERIMENTAL)
         # ==========================================================
@@ -1114,12 +1435,18 @@ with col_in:
             )
 
             # Peso global de esta configuración (qué tanto afecta al score)
+            if "pref_w_dias_widget" not in st.session_state:
+                st.session_state.pref_w_dias_widget = int(
+                    st.session_state.get("w_dias_guardado", 35)
+                )
             w_dias = st.slider(
                 "Importancia de preferencias por día",
-                0, 100, 35,
+                0, 100,
+                key="pref_w_dias_widget",
                 help="Entre más alto, más tratará de respetar tu preferencia de carga y horarios por día."
             )
 
+            st.session_state.w_dias_guardado = w_dias
             st.markdown("---")
 
             tabs_dias = st.tabs(["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
@@ -1129,13 +1456,16 @@ with col_in:
             for idx, dia in enumerate(dias_lista):
                 with tabs_dias[idx]:
                     cfg = st.session_state.config_dias[dia]
+                    st.session_state.setdefault(f"modo_{dia}", cfg.get("modo", "Normal"))
+                    st.session_state.setdefault(f"pref_{dia}", cfg.get("preferencia", "Mixto"))
+                    st.session_state.setdefault(f"maxb_{dia}", int(cfg.get("max_bloques", 10)))
+                    st.session_state.setdefault(f"ev_{dia}", bool(cfg.get("evitar", False)))
 
                     c1, c2 = st.columns([1, 1])
 
                     modo = c1.selectbox(
                         f"{dia} - Modo",
                         ["Normal", "Prioridad", "Evitar"],
-                        index=["Normal", "Prioridad", "Evitar"].index(cfg.get("modo", "Normal")),
                         key=f"modo_{dia}",
                         help="Normal = se comporta normal. Prioridad = intenta meter más carga aquí. Evitar = penaliza clases este día."
                     )
@@ -1143,21 +1473,19 @@ with col_in:
                     preferencia = c2.selectbox(
                         f"{dia} - Preferencia de horario",
                         ["Temprano", "Tarde", "Mixto", "Libre"],
-                        index=["Temprano", "Tarde", "Mixto", "Libre"].index(cfg.get("preferencia", "Mixto")),
                         key=f"pref_{dia}",
                         help="Libre intenta evitar ese día (si es posible)."
                     )
 
                     max_bloques = st.slider(
                         f"{dia} - Máximo de bloques (30 min) deseados",
-                        0, 20, int(cfg.get("max_bloques", 10)),
+                        0, 20,
                         key=f"maxb_{dia}",
                         help="0 = idealmente libre. 6 = aprox 3 horas. 10 = 5 horas. 14 = 7 horas."
                     )
 
                     evitar = st.toggle(
                         f"{dia} - Evitar este día",
-                        value=bool(cfg.get("evitar", False)),
                         key=f"ev_{dia}",
                         help="Si está activo, penaliza fuertemente cualquier clase este día."
                     )
@@ -1176,84 +1504,82 @@ with col_in:
     st.markdown("---")
 
     # ==========================================================
-    # CARGA MASIVA DE GRUPOS
+    # FUNCIONES EXPERIMENTALES
     # ==========================================================
-    with st.expander("⚡ Cargar grupos actuales `experimental`", expanded=False):
-        st.info("Pega tus grupos actuales en formato: CLAVE GRUPO (uno por línea). Ejemplo:\n1601 2")
-
-        texto_grupos = st.text_area(
-            "Mis grupos actuales:",
-            height=120,
-            placeholder="1601 2\n1120 3\n1730 1"
+    with st.expander("🧪 Funciones experimentales", expanded=False):
+        st.markdown("#### 💾 Guardado automático y respaldo")
+        st.caption(
+            "La app guarda automáticamente materias, grupos, calificaciones y "
+            "preferencias en este navegador. Al volver a abrirla, intenta "
+            "recuperarlas sin que tengas que pulsar ningún botón."
         )
 
-        if st.button("Aplicar grupos actuales", width="stretch"):
-            cargar_grupos_actuales(texto_grupos, es_obligatorio=True)
+        if local_storage is None:
+            st.warning(
+                "Instala `streamlit-local-storage==0.0.25` para activar "
+                "el guardado automático del navegador."
+            )
+        elif st.session_state.get("autoguardado_bloqueado"):
+            st.warning(
+                "El autoguardado está pausado porque una restauración fue "
+                "incompleta o el respaldo local no pudo leerse. Puedes importar "
+                "un JSON válido o borrar el progreso local para comenzar de cero."
+            )
+        elif st.session_state.get("auto_restore_completado"):
+            st.success("Guardado automático activo en este navegador.")
+        else:
+            st.info("Leyendo el progreso guardado del navegador...")
+
+        if local_storage is not None and st.button(
+            "Borrar progreso local y comenzar de cero",
+            key="exp_borrar_progreso_completo",
+            use_container_width=True,
+        ):
+            try:
+                if hasattr(local_storage, "eraseItem"):
+                    local_storage.eraseItem(STORAGE_KEY)
+                else:
+                    local_storage.deleteItem(STORAGE_KEY)
+            except Exception:
+                local_storage.deleteAll()
+            st.session_state._reinicio_usuario_pendiente = True
+            st.session_state.autoguardado_suspendido_una_vez = True
+            time.sleep(0.8)
             st.rerun()
 
-    # ==========================================================
-    # CARGA MASIVA DE CALIFICACIONES
-    # ==========================================================
-    with st.expander("📋 Carga de Calificaciones `experimental`", expanded=False):
-        st.info("Pega aquí tus celdas de Excel. El sistema buscará el nombre del profesor y actualizará su nota.")
-        st.markdown("ℹ **Para más información y ejemplos:** [Ver guía en GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main)")
-
-        raw_data = st.text_area(
-            "Pegar datos de Excel:",
-            height=150,
-            placeholder="Clave\tGpo\tProfesor...\tCalificación"
+        st.markdown("---")
+        st.caption(
+            "El archivo JSON es opcional. Sirve para mover tu configuración a "
+            "otro navegador o conservar una copia manual."
         )
-
-        if st.button("Aplicar Calificaciones Masivas"):
-            if not raw_data:
-                st.warning("El cuadro está vacío.")
-            else:
-                lines = raw_data.split('\n')
-                count_updates = 0
-
-                califs_dict = {}
-                for line in lines:
-                    parts = line.split('\t')
-                    if len(parts) >= 3:
-                        try:
-                            nombre_profe = parts[2].replace("(PRESENCIAL)", "").replace("\n", " ").strip()
-                            calif_str = parts[-1].strip()
-
-                            valor_float = float(calif_str)
-                            califs_dict[nombre_profe] = round(valor_float, 2)
-                        except:
-                            continue
-
-                if not califs_dict:
-                    st.error("No se detectó el formato correcto (Tabulaciones de Excel).")
-                else:
-                    for i, materia in enumerate(st.session_state.materias_db):
-                        for j, grupo in enumerate(materia['grupos']):
-                            profe_actual = grupo['profesor']
-                            nueva_calif = None
-
-                            if profe_actual in califs_dict:
-                                nueva_calif = califs_dict[profe_actual]
-                            else:
-                                for k_profe, v_calif in califs_dict.items():
-                                    if k_profe in profe_actual or profe_actual in k_profe:
-                                        nueva_calif = v_calif
-                                        break
-
-                            if nueva_calif is not None:
-                                st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
-                                count_updates += 1
-
-                                widget_key = f"cal_{i}_{j}"
-                                if widget_key in st.session_state:
-                                    st.session_state[widget_key] = nueva_calif
-
-                    if count_updates > 0:
-                        st.success(f"✅ ¡Se actualizaron {count_updates} profesores!")
-                        st.rerun()
-                    else:
-                        st.warning("No encontré coincidencias de nombres.")
-    
+        respaldo_json = json.dumps(
+            crear_estado_guardable(),
+            ensure_ascii=False,
+            indent=2,
+        )
+        c_export, c_import = st.columns(2)
+        c_export.download_button(
+            "Descargar respaldo opcional (.json)",
+            data=respaldo_json.encode("utf-8"),
+            file_name="horarios_fi_respaldo.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        archivo_respaldo = c_import.file_uploader(
+            "Importar respaldo",
+            type=["json"],
+            key="archivo_respaldo_json",
+        )
+        if archivo_respaldo is not None and st.button(
+            "Aplicar respaldo importado",
+            key="exp_aplicar_respaldo",
+            use_container_width=True,
+        ):
+            try:
+                st.session_state._estado_importado_pendiente = json.load(archivo_respaldo)
+                st.rerun()
+            except Exception as e:
+                st.error(f"El archivo no pudo importarse: {e}")
 
 
 # ==========================================
@@ -1264,7 +1590,7 @@ with col_list:
     if "expand_materias" not in st.session_state:
         st.session_state.expand_materias = True  # empiezan abiertas
 
-    c_header_1, c_header_2, c_header_3 = st.columns([2, 1, 1])
+    c_header_1, c_header_2, c_header_3, c_header_4 = st.columns([2, 1, 1.25, 1])
 
     c_header_1.subheader("2. Materias Registradas")
 
@@ -1272,8 +1598,18 @@ with col_list:
         refrescar_vacantes()
         st.rerun()
 
+    if c_header_3.button("⭐ Actualizar calificaciones", use_container_width=True):
+        with st.spinner("Consultando IngenieríaTracker..."):
+            resumen_api = actualizar_calificaciones_automaticamente()
+        st.success(
+            f"Aplicadas: {resumen_api['aplicados']} · "
+            f"Dudosas: {resumen_api['dudosos']} · "
+            f"No encontradas: {resumen_api['no_encontrados']}"
+        )
+        st.rerun()
+
     label_expand = "📁 Plegar todo" if st.session_state.expand_materias else "📂 Expandir todo"
-    if c_header_3.button(label_expand, use_container_width=True):
+    if c_header_4.button(label_expand, use_container_width=True):
         st.session_state.expand_materias = not st.session_state.expand_materias
         st.rerun()
 
@@ -1287,40 +1623,14 @@ with col_list:
         with st.expander(f"{m['materia']}{status}", expanded=st.session_state.expand_materias):
 
             c_api_1, c_api_2 = st.columns([1, 1])
-            if c_api_1.button("🔍 Buscar sugerencias de Calificacion", key=f"api_mat_{i}", width="stretch"):
-                grupos_actualizados = 0
-                no_encontrados = 0
-
+            if c_api_1.button("⭐ Actualizar notas de profesores", key=f"api_mat_{i}", width="stretch"):
                 with st.spinner("Consultando promedios de profesores..."):
-                    for j, g in enumerate(m['grupos']):
-                        if g.get("gpo") == "N/A":
-                            continue
-                        if g.get("profesor") == "Tú":
-                            continue
-
-                        nombre_original = g.get("profesor", "")
-                        nombre_limpio = limpiar_nombre_profesor(nombre_original)
-                        if nombre_limpio in st.session_state.api_cache_profes:
-                            resultado = st.session_state.api_cache_profes[nombre_limpio]
-                        else:
-                            resultado = consultar_ingenieria_tracker(g.get("profesor", ""))
-                            st.session_state.api_cache_profes[nombre_limpio] = resultado
-                        st.session_state.materias_db[i]['grupos'][j]['api_consultado'] = True
-
-                        promedio = resultado.get("promedio", None)
-
-                        if promedio is not None:
-                            st.session_state.materias_db[i]['grupos'][j]['sugerencia_api'] = promedio
-                            st.session_state.materias_db[i]['grupos'][j]['api_num_resenas'] = resultado.get("num_resenas", None)
-                            st.session_state.materias_db[i]['grupos'][j]['api_nombre_match'] = resultado.get("nombre_api", None)
-                            grupos_actualizados += 1
-                        else:
-                            st.session_state.materias_db[i]['grupos'][j]['sugerencia_api'] = None
-                            st.session_state.materias_db[i]['grupos'][j]['api_num_resenas'] = None
-                            st.session_state.materias_db[i]['grupos'][j]['api_nombre_match'] = None
-                            no_encontrados += 1
-
-                c_api_2.success(f"✅ API: {grupos_actualizados} encontrados | ❌ {no_encontrados} no encontrados")
+                    resumen_api = actualizar_calificaciones_automaticamente(i)
+                c_api_2.success(
+                    f"Aplicadas: {resumen_api['aplicados']} · "
+                    f"Dudosas: {resumen_api['dudosos']} · "
+                    f"Sin resultado: {resumen_api['no_encontrados']}"
+                )
                 st.rerun()
 
             c_mat_left, c_mat_right = st.columns([0.70, 0.30])
@@ -1429,6 +1739,22 @@ with col_list:
                     nueva_calif = round(nueva_calif, 2)
 
                     st.session_state.materias_db[i]['grupos'][j]['calificacion'] = nueva_calif
+
+                    profesor_actual = g.get("profesor", "")
+                    if profesor_actual not in {"", "Tú", "SIN PROFESOR PUBLICADO"}:
+                        link_google = link_busqueda_google_profesor(profesor_actual)
+                        if link_google:
+                            c_calif.markdown(
+                                f"""
+                                <div style="text-align:center; font-size:0.78em; margin-top:-8px; white-space:nowrap;">
+                                    <a href="{link_google}" target="_blank"
+                                       style="color:gray; text-decoration:none;">
+                                        Buscar en Google
+                                    </a>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
 
                     st.markdown(
                         "<div style='height:6px; border-bottom: 1px solid rgba(200,200,200,0.25); margin: 6px 0;'></div>",
@@ -1788,6 +2114,33 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
         del top_heap
         del top_heap_sorted
         gc.collect()
+
+
+# ==========================================================
+# AUTOGUARDADO EN EL NAVEGADOR
+# ==========================================================
+# Se ejecuta al final para capturar cambios hechos por cualquier widget durante
+# este rerun. La firma ignora la fecha, así que solo escribe cuando algo cambió.
+if (
+    local_storage is not None
+    and st.session_state.get("auto_restore_completado", False)
+    and not st.session_state.get("autoguardado_bloqueado", False)
+):
+    if st.session_state.get("autoguardado_suspendido_una_vez", False):
+        st.session_state.autoguardado_suspendido_una_vez = False
+    else:
+        firma_actual = firma_estado_guardable()
+        firma_anterior = st.session_state.get("_ultimo_estado_autoguardado")
+        if firma_actual != firma_anterior:
+            estado_autoguardado = crear_estado_guardable()
+            estado_json_autoguardado = json.dumps(
+                estado_autoguardado,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            # API compatible con streamlit-local-storage 0.0.25.
+            local_storage.setItem(STORAGE_KEY, estado_json_autoguardado)
+            st.session_state._ultimo_estado_autoguardado = firma_actual
 
 # --- PIE DE PÁGINA ---
 st.markdown("---")
