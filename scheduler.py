@@ -3,6 +3,8 @@ import pandas as pd
 import re
 import itertools
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import gc
 import heapq
@@ -23,20 +25,58 @@ st.markdown(
 
 # --- FUNCIONES AUXILIARES---
 def hora_a_minutos(hora_str):
-    try:
-        h, m = map(int, hora_str.split(':'))
-        return h * 60 + m
-    except:
-        return 0
+    """Convierte HH:MM a minutos; retorna None cuando el valor es inválido."""
+    if hora_str is None:
+        return None
+
+    match = re.fullmatch(r"\s*(\d{1,2})\s*:\s*(\d{2})\s*", str(hora_str))
+    if not match:
+        return None
+
+    h, m = map(int, match.groups())
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
+    return h * 60 + m
+
+
+def normalizar_dia(dia):
+    """Normaliza variantes comunes de los días usados por la FI."""
+    valor = unicodedata.normalize("NFD", str(dia or "").strip())
+    valor = "".join(ch for ch in valor if unicodedata.category(ch) != "Mn")
+    valor = re.sub(r"[^A-Za-z]", "", valor).lower()
+    mapa = {
+        "lun": "Lun", "lunes": "Lun",
+        "mar": "Mar", "martes": "Mar",
+        "mie": "Mie", "miercoles": "Mie",
+        "jue": "Jue", "jueves": "Jue",
+        "vie": "Vie", "viernes": "Vie",
+        "sab": "Sab", "sabado": "Sab",
+    }
+    return mapa.get(valor)
+
 
 def extraer_intervalos(horario_str, dias_lista):
-    try:
-        inicio_str, fin_str = horario_str.split(' a ')
-        inicio_min = hora_a_minutos(inicio_str)
-        fin_min = hora_a_minutos(fin_str)
-        return [{'dia': d.strip(), 'inicio': inicio_min, 'fin': fin_min} for d in dias_lista]
-    except:
+    """Extrae intervalos incluso si el sitio cambia espacios o usa guiones."""
+    horario = str(horario_str or "").strip()
+    match = re.search(
+        r"(\d{1,2}\s*:\s*\d{2})\s*(?:a|al|[-–—])\s*(\d{1,2}\s*:\s*\d{2})",
+        horario,
+        flags=re.IGNORECASE,
+    )
+    if not match:
         return []
+
+    inicio_min = hora_a_minutos(match.group(1))
+    fin_min = hora_a_minutos(match.group(2))
+    if inicio_min is None or fin_min is None or fin_min <= inicio_min:
+        return []
+
+    intervalos = []
+    for dia_raw in dias_lista:
+        dia = normalizar_dia(dia_raw)
+        if dia:
+            intervalos.append({"dia": dia, "inicio": inicio_min, "fin": fin_min})
+    return intervalos
 
 def limpiar_nombre_profesor(nombre):
     if not nombre:
@@ -125,7 +165,12 @@ def refrescar_vacantes():
 
                     for g_nuevo in datos_nuevos["grupos"]:
                         if g_nuevo.get("gpo") == g_viejo.get("gpo"):
-                            g_viejo["vacantes"] = g_nuevo.get("vacantes", g_viejo.get("vacantes", 0))
+                            g_viejo["cupo"] = g_nuevo.get("cupo", g_viejo.get("cupo"))
+                            g_viejo["vacantes"] = g_nuevo.get("vacantes", g_viejo.get("vacantes"))
+                            g_viejo["horario"] = g_nuevo.get("horario", g_viejo.get("horario", ""))
+                            g_viejo["dias"] = g_nuevo.get("dias", g_viejo.get("dias", ""))
+                            g_viejo["intervalos"] = g_nuevo.get("intervalos", g_viejo.get("intervalos", []))
+                            g_viejo["componentes"] = g_nuevo.get("componentes", g_viejo.get("componentes", []))
                             n_actualizados += 1
                             break
 
@@ -300,127 +345,366 @@ def calcular_penalizacion_por_dia(opcion, config_dias, w_dias=35):
     return score
 
 
-# --- CARGA DE CATÁLOGO DE MATERIAS ---
-@st.cache_data
-def cargar_nombres_materias():
-    url = "https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/listaAsignatura.js"
-    try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            patron = r"asignatura\['(\d+)'\]\s*=\s*'([^']+)';"
-            coincidencias = re.findall(patron, response.text)
+# --- CARGA DE CATÁLOGO Y HORARIOS UNAM ---
+UNAM_BASE = "https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios"
+UNAM_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/javascript;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-MX,es;q=0.9,en;q=0.7",
+    "Cache-Control": "no-cache",
+}
 
-            diccionario_nombres = {clave: nombre for clave, nombre in coincidencias}
-            return diccionario_nombres
-        else:
-            return {}
-    except requests.exceptions.Timeout:
-        st.error("El servidor de la UNAM tardó demasiado en responder al cargar el catálogo.")
-        return {}
+
+def crear_sesion_unam():
+    """Sesión con reintentos para fallos temporales del servidor de la FI."""
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    sesion = requests.Session()
+    adaptador = HTTPAdapter(max_retries=retry)
+    sesion.mount("https://", adaptador)
+    sesion.mount("http://", adaptador)
+    return sesion
+
+
+def solicitar_unam(url, timeout=(6, 20)):
+    """Descarga una página de la UNAM y conserva un mensaje HTTP útil."""
+    with crear_sesion_unam() as sesion:
+        response = sesion.get(
+            url,
+            headers=UNAM_HEADERS,
+            timeout=timeout,
+            allow_redirects=True,
+        )
+
+    if response.status_code != 200:
+        raise requests.HTTPError(
+            f"El servidor respondió HTTP {response.status_code}",
+            response=response,
+        )
+
+    # requests a veces interpreta estas páginas como ISO-8859-1.
+    if not response.encoding or response.encoding.lower() == "iso-8859-1":
+        response.encoding = response.apparent_encoding or "utf-8"
+    return response
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cargar_nombres_materias():
+    url = f"{UNAM_BASE}/listaAsignatura.js"
+    try:
+        response = solicitar_unam(url)
+
+        # Acepta comillas simples o dobles y espacios opcionales.
+        patron = re.compile(
+            r"asignatura\s*\[\s*['\"](\d+)['\"]\s*\]\s*=\s*"
+            r"(['\"])((?:\\.|(?!\2).)*)\2\s*;?",
+            flags=re.DOTALL,
+        )
+        coincidencias = patron.findall(response.text)
+        catalogo = {}
+        for clave, _, nombre in coincidencias:
+            nombre = nombre.replace("\\'", "'").replace('\\"', '"').strip()
+            catalogo[str(int(clave))] = nombre
+
+        if not catalogo:
+            raise ValueError("El catálogo respondió, pero no se reconocieron asignaturas.")
+        return catalogo
+
+    except requests.Timeout:
+        st.warning("El catálogo de la UNAM tardó demasiado. Las claves aún pueden cargarse por URL.")
+    except requests.RequestException as e:
+        st.warning(f"No se pudo descargar el catálogo de nombres: {e}")
     except Exception as e:
-        st.error(f"No se pudo cargar el catálogo de materias: {e}")
-        return {}
+        st.warning(f"No se pudo interpretar el catálogo de nombres: {e}")
+    return {}
+
 
 CATALOGO_MATERIAS = cargar_nombres_materias()
 
-# --- LÓGICA DEL PARSER ---
+
+def normalizar_encabezado(texto):
+    valor = unicodedata.normalize("NFD", str(texto or "").strip())
+    valor = "".join(ch for ch in valor if unicodedata.category(ch) != "Mn")
+    valor = re.sub(r"[^a-zA-Z0-9]", "", valor).lower()
+    equivalencias = {
+        "grupo": "gpo",
+        "gpo": "gpo",
+        "gpo.": "gpo",
+        "docente": "profesor",
+        "profesor": "profesor",
+        "dias": "dias",
+        "dia": "dias",
+        "vacan": "vacantes",
+        "vacantes": "vacantes",
+    }
+    return equivalencias.get(valor, valor)
+
+
+def expandir_tabla_con_rowspan(tabla):
+    """Convierte una tabla HTML con rowspan/colspan en filas rectangulares."""
+    filas_expandidas = []
+    pendientes = {}  # columna -> [texto, filas_restantes]
+
+    for fila_html in tabla.find_all("tr"):
+        celdas = fila_html.find_all(["th", "td"], recursive=False)
+        if not celdas:
+            continue
+
+        fila = []
+        columna = 0
+
+        def consumir_pendiente():
+            nonlocal columna
+            texto, restantes = pendientes[columna]
+            fila.append(texto)
+            if restantes <= 1:
+                del pendientes[columna]
+            else:
+                pendientes[columna] = [texto, restantes - 1]
+            columna += 1
+
+        for celda in celdas:
+            while columna in pendientes:
+                consumir_pendiente()
+
+            texto_celda = celda.get_text(" ", strip=True)
+            try:
+                rowspan = max(1, int(celda.get("rowspan", 1)))
+            except (TypeError, ValueError):
+                rowspan = 1
+            try:
+                colspan = max(1, int(celda.get("colspan", 1)))
+            except (TypeError, ValueError):
+                colspan = 1
+
+            for _ in range(colspan):
+                fila.append(texto_celda)
+                if rowspan > 1:
+                    pendientes[columna] = [texto_celda, rowspan - 1]
+                columna += 1
+
+        # Añade rowspans que aparecen al final de la fila.
+        while columna in pendientes:
+            consumir_pendiente()
+
+        filas_expandidas.append(fila)
+
+    return filas_expandidas
+
+
+def _entero_desde_texto(valor):
+    match = re.search(r"-?\d+", str(valor or ""))
+    return int(match.group()) if match else None
+
+
+def _datos_profesor(profesor_raw):
+    profesor_raw = re.sub(r"\s+", " ", str(profesor_raw or "")).strip()
+    match_modalidad = re.search(r"\(([^)]+)\)", profesor_raw)
+    modalidad = match_modalidad.group(1).strip().upper() if match_modalidad else None
+    profesor = limpiar_nombre_profesor(profesor_raw)
+    return profesor, modalidad, profesor_raw
+
+
+def _crear_grupo_base(gpo, profesor_raw, cupo, nombre_materia):
+    profesor, modalidad, profesor_raw = _datos_profesor(profesor_raw)
+    return {
+        "gpo": str(gpo).strip(),
+        "profesor": profesor or "SIN PROFESOR PUBLICADO",
+        "profesor_raw": profesor_raw,
+        "modalidad": modalidad,
+        "salon": None,  # la tabla actual no publica salón
+        "horario": "",
+        "dias": "",
+        "intervalos": [],
+        "componentes": [],
+        "calificacion": 10,
+        "materia_nombre": nombre_materia,
+        # La página actual publica Cupo, no número exacto de vacantes.
+        "cupo": cupo,
+        "vacantes": cupo,  # alias temporal para no romper versiones guardadas
+        "dato_publicado": "cupo",
+        "activo": True,
+        "api_consultado": False,
+        "sugerencia_api": None,
+        "api_num_resenas": None,
+        "api_nombre_match": None,
+    }
+
+
+def _agregar_componente(grupo, tipo, horario, dias_str):
+    tipo = str(tipo or "Clase").strip() or "Clase"
+    horario = re.sub(r"\s+", " ", str(horario or "")).strip()
+    dias_str = re.sub(r"\s+", " ", str(dias_str or "")).strip()
+    intervalos = extraer_intervalos(horario, re.split(r"[,;/]", dias_str))
+    if not intervalos:
+        return False
+
+    firma = (tipo.upper(), horario, dias_str)
+    firmas_existentes = {
+        (c["tipo"].upper(), c["horario"], c["dias"])
+        for c in grupo["componentes"]
+    }
+    if firma in firmas_existentes:
+        return True
+
+    grupo["componentes"].append({
+        "tipo": tipo,
+        "horario": horario,
+        "dias": dias_str,
+    })
+    grupo["intervalos"].extend(intervalos)
+    grupo["horario"] = "; ".join(
+        f"{c['tipo']}: {c['horario']}" for c in grupo["componentes"]
+    )
+    grupo["dias"] = "; ".join(
+        f"{c['tipo']}: {c['dias']}" for c in grupo["componentes"]
+    )
+    return True
+
+
+def parsear_grupos_desde_tablas(soup, clave_int, nombre_materia):
+    grupos = {}
+
+    for tabla in soup.find_all("table"):
+        filas = expandir_tabla_con_rowspan(tabla)
+        indices = None
+
+        for fila in filas:
+            normalizados = [normalizar_encabezado(c) for c in fila]
+            if {"clave", "gpo", "profesor", "horario", "dias"}.issubset(set(normalizados)):
+                indices = {nombre: normalizados.index(nombre) for nombre in set(normalizados)}
+                continue
+
+            if not indices:
+                continue
+
+            max_indice = max(indices.values())
+            if len(fila) <= max_indice:
+                continue
+
+            clave_fila = str(fila[indices["clave"]]).strip()
+            if not clave_fila.isdigit() or str(int(clave_fila)) != clave_int:
+                continue
+
+            gpo = str(fila[indices["gpo"]]).strip()
+            profesor_raw = str(fila[indices["profesor"]]).strip()
+            horario = str(fila[indices["horario"]]).strip()
+            dias_str = str(fila[indices["dias"]]).strip()
+            tipo = fila[indices["tipo"]] if "tipo" in indices else "Clase"
+            cupo = _entero_desde_texto(fila[indices["cupo"]]) if "cupo" in indices else None
+
+            if not gpo or not horario or not dias_str:
+                continue
+
+            if gpo not in grupos:
+                grupos[gpo] = _crear_grupo_base(gpo, profesor_raw, cupo, nombre_materia)
+            else:
+                if not grupos[gpo].get("profesor_raw") and profesor_raw:
+                    profesor, modalidad, profesor_raw = _datos_profesor(profesor_raw)
+                    grupos[gpo].update({
+                        "profesor": profesor,
+                        "modalidad": modalidad,
+                        "profesor_raw": profesor_raw,
+                    })
+                if cupo is not None:
+                    grupos[gpo]["cupo"] = cupo
+                    grupos[gpo]["vacantes"] = cupo
+
+            _agregar_componente(grupos[gpo], tipo, horario, dias_str)
+
+    return grupos
+
+
+def parsear_grupos_desde_texto(soup, nombre_materia):
+    """Respaldo para la versión móvil si la tabla vuelve a cambiar."""
+    texto = soup.get_text("\n", strip=True)
+    grupos = {}
+    patron_grupo = re.compile(
+        r"Gpo\.?\s*:\s*([^,\n]+)\s*,\s*Cupo\s*:\s*(\d+)\s*(.*?)"
+        r"(?=Gpo\.?\s*:|Horario\s+Actualizado|$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    for match in patron_grupo.finditer(texto):
+        gpo, cupo_txt, bloque = match.groups()
+        prof_match = re.search(
+            r"Profesor\s*:\s*(.*?)(?=\n\s*Tipo\s*:)",
+            bloque,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        profesor_raw = prof_match.group(1).strip() if prof_match else ""
+        grupo = _crear_grupo_base(gpo, profesor_raw, int(cupo_txt), nombre_materia)
+
+        patron_componente = re.compile(
+            r"Tipo\s*:\s*([^\n]+).*?Horario\s*:\s*([^\n]+).*?D[ií]as\s*:\s*([^\n]+)",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for tipo, horario, dias_str in patron_componente.findall(bloque):
+            _agregar_componente(grupo, tipo, horario, dias_str)
+
+        if grupo["intervalos"]:
+            grupos[str(gpo).strip()] = grupo
+
+    return grupos
+
+
 def obtener_datos_unam(clave_materia, es_obligatoria):
-    clave_materia = str(clave_materia)
+    """Carga una materia y agrupa todas las sesiones T/L/A de cada grupo."""
     try:
-        clave_int = str(int(clave_materia))
-    except:
+        clave_int = str(int(str(clave_materia).strip()))
+    except (TypeError, ValueError):
+        st.error(f"La clave '{clave_materia}' no es numérica.")
         return []
 
-
-    nombre_limpio = CATALOGO_MATERIAS.get(clave_int, "MATERIA DESCONOCIDA")
+    nombre_limpio = CATALOGO_MATERIAS.get(clave_int, "MATERIA SIN NOMBRE EN CATÁLOGO")
     nombre_materia = f"{clave_int} - {nombre_limpio}"
-
-    url = f"https://www.ssa.ingenieria.unam.mx/cj/tmp/programacion_horarios/{clave_int}.html"
+    url = f"{UNAM_BASE}/{clave_int}.html"
 
     try:
-        response = requests.get(url, timeout=5)
-        if response.status_code != 200: return None
+        response = solicitar_unam(url)
+        soup = BeautifulSoup(response.text, "html.parser")
 
-        soup = BeautifulSoup(response.text, 'html.parser')
+        grupos = parsear_grupos_desde_tablas(soup, clave_int, nombre_materia)
+        if not grupos:
+            grupos = parsear_grupos_desde_texto(soup, nombre_materia)
 
-        tablas = soup.find_all('table')
-        if not tablas: return []
+        grupos_validos = [g for g in grupos.values() if g.get("intervalos")]
+        if not grupos_validos:
+            titulo = soup.title.get_text(" ", strip=True) if soup.title else ""
+            st.error(
+                f"La página de la clave {clave_int} sí respondió, pero no se encontraron "
+                f"grupos con horarios reconocibles. Título recibido: {titulo or 'sin título'}."
+            )
+            return []
 
-        datos_materia = {
+        return [{
             "materia": nombre_materia,
             "obligatoria": es_obligatoria,
-            "grupos": []
-        }
+            "grupos": grupos_validos,
+            "url_fuente": response.url,
+        }]
 
-        for tabla in tablas:
-            filas = tabla.find_all('tr')
-            for fila in filas:
-                celdas = fila.find_all('td')
-                datos = [c.get_text(strip=True) for c in celdas]
-
-                if len(datos) < 7: continue
-                if datos[0] == "Clave": continue
-
-                gpo = datos[1]
-                # --- PROFESOR Y MODALIDAD---
-                profesor_raw = datos[2].replace("\n", " ").strip()
-
-                modalidad = None
-                match_modalidad = re.search(r"\(([^)]+)\)", profesor_raw)
-                if match_modalidad:
-                    modalidad = match_modalidad.group(1).strip().upper()
-                profesor_limpio = re.sub(r"\([^)]*\)", "", profesor_raw).strip()
-                profesor_limpio = re.sub(
-                    r"^(ING\.|DR\.|DRA\.|M\.I\.|M\. EN I\.|MC\.|MTRO\.|MTRA\.|LIC\.|ARQ\.)\s+",
-                    "",
-                    profesor_limpio,
-                    flags=re.IGNORECASE
-                ).strip()
-
-                profesor = profesor_limpio
-
-                horario = datos[4]
-                dias_str = datos[5]
-
-                salon = datos[6] if len(datos) >= 8 else "SIN"
-                salon = salon.strip() if salon else "SIN"
-
-                try:
-                    vacantes = int(datos[-1])
-                except:
-                    vacantes = 0
-
-
-                intervalos = extraer_intervalos(horario, dias_str.split(','))
-
-                datos_materia["grupos"].append({
-                    "gpo": gpo,
-                    "profesor": profesor,
-                    "profesor_raw": profesor_raw,
-                    "modalidad": modalidad,
-                    "salon": salon,
-                    "horario": horario,
-                    "dias": dias_str,
-                    "intervalos": intervalos,
-                    "calificacion": 10,
-                    "materia_nombre": nombre_materia,
-                    "vacantes": vacantes,
-                    "activo": vacantes > 0,
-                    "api_consultado": False,
-                    "sugerencia_api": None,
-                    "api_num_resenas": None,
-                    "api_nombre_match": None
-                })
-
-        if not datos_materia["grupos"]: return []
-        return [datos_materia]
-
-    except requests.exceptions.Timeout:
-        st.error(f"Tiempo de espera agotado al buscar la clave {clave_int}. Intenta de nuevo.")
-        return []
+    except requests.Timeout:
+        st.error(f"La UNAM tardó demasiado al consultar la clave {clave_int}.")
+    except requests.HTTPError as e:
+        estado = e.response.status_code if e.response is not None else "desconocido"
+        st.error(f"La página de la clave {clave_int} respondió con HTTP {estado}.")
+    except requests.RequestException as e:
+        st.error(f"No fue posible conectar con la UNAM para la clave {clave_int}: {e}")
     except Exception as e:
-        st.error(f"Error técnico: {e}")
-        return []
+        st.error(f"No se pudo interpretar la clave {clave_int}: {type(e).__name__}: {e}")
+    return []
 
 # --- LÓGICA DE VALIDACIÓN Y SCORE ---
 def hay_traslape(g1, g2):
@@ -508,7 +792,7 @@ def generar_ics_desde_opcion(materias_combinadas, nombre_calendario="Horario FI 
         salon = g.get("salon", "SIN")
         horario = g.get("horario", "")
         dias = g.get("dias", "")
-        vacantes = g.get("vacantes", "")
+        vacantes = g.get("cupo", g.get("vacantes", ""))
 
         if salon and str(salon).strip().upper() != "SIN":
             summary = f"{materia_nombre} | GPO {g.get('gpo','')} | {salon}"
@@ -603,6 +887,7 @@ def dataframe_a_png(df_text, df_color=None):
 
 # --- INTERFAZ DE USUARIO ---
 st.title("Generador de Horarios FI")
+st.caption("Versión corregida: parser UNAM con teoría/laboratorio agrupados")
 
 if 'materias_db' not in st.session_state:
     st.session_state.materias_db = []
@@ -622,9 +907,9 @@ with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
     Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej. `1730` o `1120, 1601, 32`) y presiona **Agregar Materias**.
 
     **3. Revisa Grupos y Cupos:**
-    En la lista de la derecha verás los grupos disponibles con sus vacantes.
+    En la lista de la derecha verás los grupos publicados y su cupo total.
     * **Desmarca la casilla** ☑️ de los grupos que no te interesen para que el generador los ignore.
-    * Usa **🔄 Refrescar Cupos** para actualizar vacantes sin borrar tus materias.
+    * Usa **🔄 Refrescar Cupos** para actualizar el cupo publicado y los horarios sin borrar tus materias.
 
     **4. Consulta Promedios de Profesores:**
     Dentro de cada materia, presiona **🔍 Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
@@ -681,14 +966,26 @@ with col_in:
                 if clave_raw.isdigit():
                     clave_limpia = str(int(clave_raw))
 
+                    ya_existe = any(
+                        str(m.get("materia", "")).split(" - ")[0].strip() == clave_limpia
+                        for m in st.session_state.materias_db
+                        if not m.get("es_bloqueo", False)
+                    )
+                    if ya_existe:
+                        errores.append(f"Clave {clave_limpia}: ya estaba agregada")
+                        barra.progress((i + 1) / len(lista_claves))
+                        continue
+
                     nuevas = obtener_datos_unam(clave_limpia, True)
 
                     if nuevas:
-                        nombre = nuevas[0]['materia']
+                        nombre = nuevas[0]["materia"]
                         st.session_state.materias_db.extend(nuevas)
                         agregadas.append(nombre)
                     else:
-                        errores.append(f"Clave {clave_limpia}: No encontrada")
+                        errores.append(
+                            f"Clave {clave_limpia}: no se pudieron cargar grupos publicados"
+                        )
                 else:
                     errores.append(f"'{clave_raw}' no es una clave válida")
 
@@ -733,7 +1030,9 @@ with col_in:
                         "intervalos": intervalos_manual,
                         "calificacion": 10,
                         "materia_nombre": act_nombre,
-                        "vacantes": 999,
+                        "cupo": None,
+                        "vacantes": None,
+                        "componentes": [{"tipo": "Bloqueo", "horario": str_horario, "dias": ", ".join(act_dias)}],
                         "activo": True,
                         "sugerencia_api": None,
                         "api_num_resenas": None,
@@ -1056,8 +1355,11 @@ with col_list:
 
                 st.session_state.materias_db[i]['grupos'][j]['activo'] = activo
 
-                vacs = g.get('vacantes', 0)
-                color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+                vacs = g.get("cupo", g.get("vacantes"))
+                if isinstance(vacs, (int, float)):
+                    color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+                else:
+                    color_vac = "gray"
                 sug = g.get("sugerencia_api", None)
                 num_res = g.get("api_num_resenas", None)
                 consultado = g.get("api_consultado", False)
@@ -1084,22 +1386,25 @@ with col_list:
                     else:
                         sug_txt = "<span style='color:gray;'>⭐ Sugerencia Calificacion: No encontrado</span>"
 
-                vacs = g.get('vacantes', 0)
-                color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+                vacs = g.get("cupo", g.get("vacantes"))
+                if isinstance(vacs, (int, float)):
+                    color_vac = "green" if vacs > 5 else ("orange" if vacs > 0 else "red")
+                else:
+                    color_vac = "gray"
                 salon = g.get("salon", None)
 
                 salon_txt = ""
                 if salon and salon.strip().upper() != "SIN":
                     salon_txt = f" <span style='color:#555;'>(Salón: <strong>{salon}</strong>)</span>"
-                elif salon and salon.strip().upper() == "SIN":
-                    salon_txt = f" <span style='color:#777;'>(En línea / SIN salón)</span>"
+                elif not salon or str(salon).strip().upper() == "SIN":
+                    salon_txt = " <span style='color:#777;'>(Salón no publicado)</span>"
 
 
                 info_html = f"""
                 <div style="font-size: 0.9em;">
                     <strong>Gpo {g['gpo']}</strong> - {g['profesor']}{salon_txt}<br>
                     📅 {g['dias']} ({g['horario']})<br>
-                    Vacantes: <strong style='color: {color_vac}'>{vacs}</strong><br>
+                    Cupo publicado: <strong style='color: {color_vac}'>{vacs if vacs is not None else "N/D"}</strong><br>
                     {sug_txt}
                 </div>
                 """
@@ -1144,10 +1449,10 @@ st.caption(
 # ============================
 c_vis1, c_vis2 = st.columns([1, 1])
 
-mostrar_sin_cupo = c_vis1.toggle(
-    "Mostrar ⚠️SIN CUPO en el horario",
-    value=True,
-    help="Si lo apagas, el horario no mostrará la etiqueta ⚠️SIN CUPO, pero seguirá marcando el borde rojo."
+mostrar_sin_cupo = False
+c_vis1.caption(
+    "La fuente actual publica el cupo total del grupo, no el número exacto de vacantes; "
+    "por eso ya no se marca automáticamente ‘SIN CUPO’."
 )
 
 if st.button("Generar combinaciones optimizadas", width="stretch"):
@@ -1159,12 +1464,26 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
         materias_omitidas = []
 
         for m in st.session_state.materias_db:
-            grupos_validos = [g for g in m['grupos'] if g.get('activo', True)]
+            grupos_validos = [g for g in m["grupos"] if g.get("activo", True)]
+
+            # Una materia marcada como opcional agrega la alternativa real de no cursarla.
+            if grupos_validos and not m.get("obligatoria", True):
+                grupos_validos = grupos_validos + [{
+                    "gpo": "N/A",
+                    "profesor": "",
+                    "horario": "",
+                    "dias": "",
+                    "intervalos": [],
+                    "calificacion": 0,
+                    "materia_nombre": m.get("materia", "Materia opcional"),
+                    "cupo": None,
+                    "vacantes": None,
+                    "activo": True,
+                }]
 
             if grupos_validos:
                 grupos_input.append(grupos_validos)
             else:
-                # Si no hay grupos activos, se omite la materia
                 materias_omitidas.append(m["materia"])
                 continue
 
@@ -1213,6 +1532,11 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
 
             if es_horario_valido(comb):
                 sc = calcular_score(comb, pesos)
+                sc += calcular_penalizacion_por_dia(
+                    {"materias": comb},
+                    st.session_state.config_dias,
+                    w_dias=w_dias,
+                )
 
                 if len(top_heap) < TOP_K:
                     heapq.heappush(top_heap, (sc, idx, comb))
@@ -1232,15 +1556,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
         # ==========================================================
         if posibles:
 
-            # ✅ APLICAR CONFIG AVANZADA POR DÍA AL SCORE (ANTES DE MOSTRAR)
-            for opcion in posibles:
-                opcion["score"] += calcular_penalizacion_por_dia(
-                    opcion,
-                    st.session_state.config_dias,
-                    w_dias=w_dias
-                )
-
-            # ✅ Reordenar opciones con el score actualizado
+            # El score completo ya se aplicó durante la búsqueda del top 10.
             posibles = sorted(posibles, key=lambda x: x["score"], reverse=True)
 
             st.success("¡Horarios generados con éxito!")
@@ -1333,7 +1649,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                         profesor_corto = m_g['profesor'].split('\n')[0][:18]
                         salon = m_g.get("salon", "SIN")
                         salon = salon.strip() if salon else "SIN"
-                        vacs_grupo = m_g.get("vacantes", None)
+                        vacs_grupo = None  # la fuente actual publica cupo total, no vacantes exactas
                         sin_cupo = False
                         try:
                             if vacs_grupo is not None and int(vacs_grupo) <= 0:
@@ -1431,8 +1747,8 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                         profesor = g.get("profesor", "")
                         salon = g.get("salon", "SIN")
                         
-                        # --- NUEVO: Extraemos las vacantes ---
-                        vacantes = g.get("vacantes", 0) 
+                        # Extraemos el cupo total publicado por la Facultad
+                        vacantes = g.get("cupo", g.get("vacantes")) 
 
                         # Separar clave y nombre
                         if " - " in materia_nombre:
@@ -1446,7 +1762,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                             "Materia": nombre_mat,
                             "Profesor": profesor,
                             "Salón": salon,
-                            "Vacantes": vacantes  # <--- Aquí agregamos la columna nueva
+                            "Cupo publicado": vacantes
                         })
 
                     df_resumen = pd.DataFrame(lista_resumen)
@@ -1457,11 +1773,10 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
 
                     # Mostramos la tabla (usamos st.dataframe para que sea interactiva)
                     st.dataframe(
-                        df_resumen, 
-                        width=None,   # Ajuste automático
-                        use_container_width=True, # Ocupar todo el ancho
-                        hide_index=True, # Ocultar el índice numérico (0,1,2...) para que se vea mejor
-                        height=420
+                        df_resumen,
+                        width="stretch",
+                        hide_index=True,
+                        height=420,
                     )
 
         else:
