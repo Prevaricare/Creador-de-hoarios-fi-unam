@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import re
-import itertools
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -997,6 +996,580 @@ def es_horario_valido(combinacion):
                 return False
     return True
 
+
+# ==========================================================
+# DIAGNÓSTICO DE CONFLICTOS DE HORARIO
+# ==========================================================
+DIAS_ORDEN = {"Lun": 0, "Mar": 1, "Mie": 2, "Jue": 3, "Vie": 4, "Sab": 5}
+
+
+def minutos_a_hora(minutos):
+    """Convierte minutos desde medianoche a HH:MM."""
+    try:
+        minutos = int(minutos)
+    except (TypeError, ValueError):
+        return "--:--"
+    return f"{minutos // 60:02d}:{minutos % 60:02d}"
+
+
+def nombre_corto_materia(nombre):
+    """Elimina la clave para textos compactos, conservándola cuando no hay nombre."""
+    nombre = str(nombre or "Materia").strip()
+    if " - " in nombre:
+        clave, descripcion = nombre.split(" - ", 1)
+        return f"{clave} · {descripcion}"
+    return nombre
+
+
+def obtener_traslapes(g1, g2):
+    """Devuelve todos los traslapes exactos entre dos grupos."""
+    conflictos = []
+    for s1 in g1.get("intervalos", []):
+        for s2 in g2.get("intervalos", []):
+            if s1.get("dia") != s2.get("dia"):
+                continue
+
+            inicio = max(int(s1.get("inicio", 0)), int(s2.get("inicio", 0)))
+            fin = min(int(s1.get("fin", 0)), int(s2.get("fin", 0)))
+            if inicio < fin:
+                conflictos.append({
+                    "dia": s1.get("dia"),
+                    "inicio": inicio,
+                    "fin": fin,
+                    "duracion": fin - inicio,
+                    "tipo_1": s1.get("tipo", ""),
+                    "tipo_2": s2.get("tipo", ""),
+                })
+    return conflictos
+
+
+def construir_materias_diagnostico(materias_db):
+    """
+    Construye el problema obligatorio real.
+
+    Las materias opcionales no pueden hacer imposible el horario porque el
+    generador siempre puede elegir N/A. Los bloqueos personales sí se incluyen.
+    """
+    registros = []
+    for indice, materia in enumerate(materias_db):
+        if not materia.get("obligatoria", True):
+            continue
+
+        grupos_activos = [
+            g for g in materia.get("grupos", [])
+            if g.get("activo", True)
+            and g.get("gpo") != "N/A"
+            and g.get("intervalos")
+        ]
+        if not grupos_activos:
+            continue
+
+        registros.append({
+            "id": indice,
+            "indice_db": indice,
+            "nombre": materia.get("materia", f"Materia {indice + 1}"),
+            "es_bloqueo": bool(materia.get("es_bloqueo", False)),
+            "grupos": grupos_activos,
+        })
+    return registros
+
+
+def buscar_solucion_por_restricciones(registros, limite_nodos=250_000):
+    """
+    Busca una combinación válida con backtracking y poda.
+
+    Retorna (estado, solucion, nodos):
+      - estado='valido': encontró una combinación.
+      - estado='invalido': exploró todo y demostró que no existe.
+      - estado='limite': no pudo concluir dentro del límite.
+    """
+    if not registros:
+        return "valido", tuple(), 0
+
+    ordenados = sorted(
+        registros,
+        key=lambda r: (len(r.get("grupos", [])), 0 if r.get("es_bloqueo") else 1),
+    )
+    elegidos = []
+    nodos = 0
+    limite_superado = False
+
+    # Los grupos con menos conflictos se intentan primero. Esto ayuda a encontrar
+    # una solución rápidamente cuando sí existe.
+    def ordenar_candidatos(posicion):
+        candidatos = ordenados[posicion].get("grupos", [])
+        if not elegidos:
+            return candidatos
+        return sorted(
+            candidatos,
+            key=lambda g: sum(1 for elegido in elegidos if hay_traslape(g, elegido)),
+        )
+
+    def backtrack(posicion):
+        nonlocal nodos, limite_superado
+        if nodos >= limite_nodos:
+            limite_superado = True
+            return None
+        if posicion >= len(ordenados):
+            return tuple(elegidos)
+
+        for grupo in ordenar_candidatos(posicion):
+            nodos += 1
+            if nodos >= limite_nodos:
+                limite_superado = True
+                return None
+            if any(hay_traslape(grupo, elegido) for elegido in elegidos):
+                continue
+            elegidos.append(grupo)
+            resultado = backtrack(posicion + 1)
+            if resultado is not None:
+                return resultado
+            elegidos.pop()
+        return None
+
+    solucion = backtrack(0)
+    if solucion is not None:
+        return "valido", solucion, nodos
+    if limite_superado:
+        return "limite", None, nodos
+    return "invalido", None, nodos
+
+
+def encontrar_nucleo_conflicto(registros, limite_nodos=120_000):
+    """Obtiene un subconjunto irreducible de materias/bloqueos incompatibles."""
+    cache = {}
+
+    def estado_de(subconjunto):
+        clave = tuple(sorted(r["id"] for r in subconjunto))
+        if clave not in cache:
+            cache[clave] = buscar_solucion_por_restricciones(
+                subconjunto,
+                limite_nodos=limite_nodos,
+            )[0]
+        return cache[clave]
+
+    if estado_de(registros) != "invalido":
+        return [], cache
+
+    nucleo = list(registros)
+    cambio = True
+    while cambio and len(nucleo) > 2:
+        cambio = False
+        for registro in list(nucleo):
+            prueba = [r for r in nucleo if r["id"] != registro["id"]]
+            if len(prueba) >= 2 and estado_de(prueba) == "invalido":
+                nucleo = prueba
+                cambio = True
+                break
+    return nucleo, cache
+
+
+def analizar_pares_conflictivos(registros):
+    """Calcula incompatibilidad y detalles para cada pareja de materias."""
+    pares = []
+    ranking_grupos = {}
+    ventanas = {}
+
+    for i in range(len(registros)):
+        for j in range(i + 1, len(registros)):
+            materia_a = registros[i]
+            materia_b = registros[j]
+            total = len(materia_a["grupos"]) * len(materia_b["grupos"])
+            con_conflicto = 0
+            minutos_totales = 0
+            detalles = []
+
+            for grupo_a in materia_a["grupos"]:
+                for grupo_b in materia_b["grupos"]:
+                    traslapes = obtener_traslapes(grupo_a, grupo_b)
+                    if not traslapes:
+                        continue
+
+                    con_conflicto += 1
+                    duracion_par = sum(t["duracion"] for t in traslapes)
+                    minutos_totales += duracion_par
+                    detalles.append({
+                        "grupo_a": grupo_a,
+                        "grupo_b": grupo_b,
+                        "traslapes": traslapes,
+                        "duracion": duracion_par,
+                    })
+
+                    for materia, grupo, otra in (
+                        (materia_a, grupo_a, materia_b),
+                        (materia_b, grupo_b, materia_a),
+                    ):
+                        clave_grupo = (materia["id"], str(grupo.get("gpo", "")))
+                        entrada = ranking_grupos.setdefault(clave_grupo, {
+                            "materia": materia["nombre"],
+                            "grupo": grupo.get("gpo", ""),
+                            "profesor": grupo.get("profesor", ""),
+                            "pares_conflictivos": 0,
+                            "minutos": 0,
+                            "materias_afectadas": set(),
+                        })
+                        entrada["pares_conflictivos"] += 1
+                        entrada["minutos"] += duracion_par
+                        entrada["materias_afectadas"].add(otra["nombre"])
+
+                    for traslape in traslapes:
+                        clave_ventana = (
+                            traslape["dia"],
+                            traslape["inicio"],
+                            traslape["fin"],
+                        )
+                        ventana = ventanas.setdefault(clave_ventana, {
+                            "dia": traslape["dia"],
+                            "inicio": traslape["inicio"],
+                            "fin": traslape["fin"],
+                            "apariciones": 0,
+                            "parejas": set(),
+                        })
+                        ventana["apariciones"] += 1
+                        ventana["parejas"].add(
+                            (materia_a["nombre"], materia_b["nombre"])
+                        )
+
+            if con_conflicto:
+                porcentaje = (con_conflicto / total * 100) if total else 0
+                pares.append({
+                    "materia_a": materia_a,
+                    "materia_b": materia_b,
+                    "total": total,
+                    "con_conflicto": con_conflicto,
+                    "porcentaje": porcentaje,
+                    "incompatibilidad_total": total > 0 and con_conflicto == total,
+                    "minutos_totales": minutos_totales,
+                    "detalles": detalles,
+                })
+
+    pares.sort(
+        key=lambda p: (
+            p["incompatibilidad_total"],
+            p["porcentaje"],
+            p["minutos_totales"],
+        ),
+        reverse=True,
+    )
+
+    grupos_ordenados = sorted(
+        ranking_grupos.values(),
+        key=lambda g: (g["pares_conflictivos"], g["minutos"]),
+        reverse=True,
+    )
+    ventanas_ordenadas = sorted(
+        ventanas.values(),
+        key=lambda v: (
+            v["apariciones"],
+            len(v["parejas"]),
+            -DIAS_ORDEN.get(v["dia"], 99),
+        ),
+        reverse=True,
+    )
+    return pares, grupos_ordenados, ventanas_ordenadas
+
+
+def sugerir_grupos_alternativos(registros, materias_db, max_sugerencias=6):
+    """Busca grupos inactivos que por sí solos vuelvan factible el problema."""
+    sugerencias = []
+    for registro in registros:
+        materia_original = materias_db[registro["indice_db"]]
+        grupos_inactivos = [
+            g for g in materia_original.get("grupos", [])
+            if not g.get("activo", True)
+            and g.get("gpo") != "N/A"
+            and g.get("intervalos")
+        ]
+
+        for candidato in grupos_inactivos:
+            prueba = []
+            for actual in registros:
+                copia = dict(actual)
+                if actual["id"] == registro["id"]:
+                    # Activarlo agrega una opción; no obliga a usarlo.
+                    copia["grupos"] = list(actual["grupos"]) + [candidato]
+                prueba.append(copia)
+
+            estado, solucion, _ = buscar_solucion_por_restricciones(
+                prueba,
+                limite_nodos=100_000,
+            )
+            if estado == "valido":
+                indice_grupo = next(
+                    (
+                        idx for idx, grupo_original
+                        in enumerate(materia_original.get("grupos", []))
+                        if grupo_original is candidato
+                    ),
+                    None,
+                )
+                sugerencias.append({
+                    "materia": registro["nombre"],
+                    "grupo": candidato.get("gpo", ""),
+                    "profesor": candidato.get("profesor", ""),
+                    "dias": candidato.get("dias", ""),
+                    "horario": candidato.get("horario", ""),
+                    "vacantes": candidato.get("vacantes"),
+                    "indice_db": registro["indice_db"],
+                    "indice_grupo": indice_grupo,
+                })
+                break
+
+        if len(sugerencias) >= max_sugerencias:
+            break
+    return sugerencias
+
+
+def analizar_conflictos_horario(materias_db):
+    """Genera toda la información necesaria para explicar un fallo."""
+    registros = construir_materias_diagnostico(materias_db)
+    estado, solucion, nodos = buscar_solucion_por_restricciones(registros)
+
+    resultado = {
+        "estado": estado,
+        "solucion": solucion,
+        "nodos": nodos,
+        "registros": registros,
+        "nucleo": [],
+        "pares": [],
+        "ranking_grupos": [],
+        "ventanas": [],
+        "alternativas": [],
+        "omisiones_que_resuelven": [],
+    }
+
+    if estado != "invalido":
+        return resultado
+
+    nucleo, _ = encontrar_nucleo_conflicto(registros)
+    registros_analisis = nucleo or registros
+    pares, ranking, ventanas = analizar_pares_conflictivos(registros_analisis)
+
+    omisiones = []
+    for registro in registros_analisis:
+        prueba = [r for r in registros if r["id"] != registro["id"]]
+        estado_prueba, _, _ = buscar_solucion_por_restricciones(
+            prueba,
+            limite_nodos=120_000,
+        )
+        if estado_prueba == "valido":
+            omisiones.append(registro)
+
+    resultado.update({
+        "nucleo": registros_analisis,
+        "pares": pares,
+        "ranking_grupos": ranking,
+        "ventanas": ventanas,
+        "alternativas": sugerir_grupos_alternativos(
+            registros,
+            materias_db,
+        ),
+        "omisiones_que_resuelven": omisiones,
+    })
+    return resultado
+
+
+def activar_grupo_desde_diagnostico(indice_materia, indice_grupo):
+    """Activa un grupo sugerido antes de que Streamlit reconstruya los widgets."""
+    try:
+        grupo = st.session_state.materias_db[indice_materia]["grupos"][indice_grupo]
+        grupo["activo"] = True
+        st.session_state[f"tgl_{indice_materia}_{indice_grupo}"] = True
+    except (IndexError, KeyError, TypeError):
+        pass
+
+
+def marcar_materia_opcional_desde_diagnostico(indice_materia):
+    """Marca una materia como opcional desde una sugerencia del diagnóstico."""
+    try:
+        st.session_state.materias_db[indice_materia]["obligatoria"] = False
+        st.session_state[f"radio_tipo_{indice_materia}"] = "Opcional"
+    except (IndexError, KeyError, TypeError):
+        pass
+
+
+def texto_intervalos(traslapes):
+    partes = []
+    for t in sorted(
+        traslapes,
+        key=lambda x: (DIAS_ORDEN.get(x["dia"], 99), x["inicio"]),
+    ):
+        partes.append(
+            f"{t['dia']} {minutos_a_hora(t['inicio'])}–{minutos_a_hora(t['fin'])}"
+        )
+    return ", ".join(partes)
+
+
+def mostrar_diagnostico_conflictos(diagnostico):
+    """Presenta un diagnóstico comprensible y accionable en Streamlit."""
+    estado = diagnostico.get("estado")
+    registros = diagnostico.get("registros", [])
+
+    if len(registros) < 2:
+        st.warning(
+            "No hay suficientes materias obligatorias con grupos activos para "
+            "analizar traslapes. Revisa que cada materia tenga al menos un grupo activo."
+        )
+        return
+
+    if estado == "limite":
+        st.warning(
+            "El diagnóstico alcanzó su límite interno de búsqueda y no pudo demostrar "
+            "si el horario es imposible. Abajo se muestran los traslapes más frecuentes."
+        )
+        pares, ranking, ventanas = analizar_pares_conflictivos(registros)
+        diagnostico["pares"] = pares
+        diagnostico["ranking_grupos"] = ranking
+        diagnostico["ventanas"] = ventanas
+    elif estado == "invalido":
+        st.error(
+            "No existe una combinación compatible con las materias obligatorias, "
+            "los grupos activos y los bloqueos actuales."
+        )
+
+    nucleo = diagnostico.get("nucleo", [])
+    if nucleo:
+        nombres_nucleo = [nombre_corto_materia(r["nombre"]) for r in nucleo]
+        st.markdown("### Núcleo del conflicto")
+        st.write(
+            "El problema puede reducirse a estas materias o bloqueos; las demás no son "
+            "necesarias para reproducir el fallo:"
+        )
+        for nombre in nombres_nucleo:
+            st.markdown(f"- **{nombre}**")
+
+    pares = diagnostico.get("pares", [])
+    if pares:
+        st.markdown("### Conflictos principales")
+        for posicion, par in enumerate(pares[:5], start=1):
+            nombre_a = nombre_corto_materia(par["materia_a"]["nombre"])
+            nombre_b = nombre_corto_materia(par["materia_b"]["nombre"])
+            etiqueta = "Conflicto total" if par["incompatibilidad_total"] else "Conflicto alto"
+            st.markdown(
+                f"**{posicion}. {nombre_a} ↔ {nombre_b} — {etiqueta} "
+                f"({par['con_conflicto']} de {par['total']} combinaciones, "
+                f"{par['porcentaje']:.0f}%)**"
+            )
+
+            detalles_ordenados = sorted(
+                par["detalles"],
+                key=lambda d: d["duracion"],
+                reverse=True,
+            )
+            with st.expander("Ver grupos y horas involucradas", expanded=posicion == 1):
+                filas = []
+                for detalle in detalles_ordenados[:20]:
+                    g_a = detalle["grupo_a"]
+                    g_b = detalle["grupo_b"]
+                    filas.append({
+                        "Grupo 1": f"G{g_a.get('gpo', '')} · {g_a.get('profesor', '')}",
+                        "Grupo 2": f"G{g_b.get('gpo', '')} · {g_b.get('profesor', '')}",
+                        "Traslape": texto_intervalos(detalle["traslapes"]),
+                        "Minutos": detalle["duracion"],
+                    })
+                st.dataframe(
+                    pd.DataFrame(filas),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    ranking = diagnostico.get("ranking_grupos", [])
+    ventanas = diagnostico.get("ventanas", [])
+    if ranking or ventanas:
+        st.markdown("### Dónde se concentra el problema")
+        col_grupos, col_horas = st.columns(2)
+
+        with col_grupos:
+            st.markdown("**Grupos con más conflictos**")
+            filas_grupos = []
+            for grupo in ranking[:8]:
+                filas_grupos.append({
+                    "Materia": nombre_corto_materia(grupo["materia"]),
+                    "Grupo": grupo["grupo"],
+                    "Conflictos": grupo["pares_conflictivos"],
+                    "Materias afectadas": len(grupo["materias_afectadas"]),
+                })
+            if filas_grupos:
+                st.dataframe(
+                    pd.DataFrame(filas_grupos),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+        with col_horas:
+            st.markdown("**Horas con más traslapes**")
+            filas_horas = []
+            for ventana in ventanas[:8]:
+                filas_horas.append({
+                    "Día": ventana["dia"],
+                    "Horario": (
+                        f"{minutos_a_hora(ventana['inicio'])}–"
+                        f"{minutos_a_hora(ventana['fin'])}"
+                    ),
+                    "Traslapes": ventana["apariciones"],
+                    "Parejas": len(ventana["parejas"]),
+                })
+            if filas_horas:
+                st.dataframe(
+                    pd.DataFrame(filas_horas),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    st.markdown("### Posibles soluciones")
+    hubo_sugerencias = False
+
+    alternativas = diagnostico.get("alternativas", [])
+    for alternativa in alternativas:
+        hubo_sugerencias = True
+        disponibilidad = alternativa.get("vacantes")
+        texto_vacantes = (
+            f" · {disponibilidad} vacantes"
+            if disponibilidad is not None
+            else ""
+        )
+        st.success(
+            f"Activa el **grupo {alternativa['grupo']}** de "
+            f"**{nombre_corto_materia(alternativa['materia'])}** "
+            f"({alternativa.get('dias', '')} {alternativa.get('horario', '')})"
+            f"{texto_vacantes}. Con esa opción sí existe al menos una combinación válida."
+        )
+        if alternativa.get("indice_grupo") is not None:
+            st.button(
+                f"Activar grupo {alternativa['grupo']}",
+                key=(
+                    f"diag_activar_{alternativa['indice_db']}_"
+                    f"{alternativa['indice_grupo']}"
+                ),
+                on_click=activar_grupo_desde_diagnostico,
+                args=(alternativa["indice_db"], alternativa["indice_grupo"]),
+            )
+
+    for registro in diagnostico.get("omisiones_que_resuelven", [])[:4]:
+        hubo_sugerencias = True
+        if registro.get("es_bloqueo"):
+            st.info(
+                f"Ajustar o quitar el bloqueo **{nombre_corto_materia(registro['nombre'])}** "
+                "permite generar al menos un horario."
+            )
+        else:
+            st.info(
+                f"Marcar **{nombre_corto_materia(registro['nombre'])}** como opcional "
+                "permite generar al menos un horario."
+            )
+            st.button(
+                "Marcar como opcional",
+                key=f"diag_opcional_{registro['indice_db']}",
+                on_click=marcar_materia_opcional_desde_diagnostico,
+                args=(registro["indice_db"],),
+            )
+
+    if not hubo_sugerencias:
+        st.info(
+            "No se encontró una solución de un solo cambio. Prueba activando más grupos "
+            "en las materias del núcleo del conflicto o ajustando tus bloqueos personales."
+        )
+
 def calcular_score(combinacion, pesos):
     grupos_reales = [g for g in combinacion if g['gpo'] != "N/A"]
     if not grupos_reales: return -1000
@@ -1030,6 +1603,276 @@ def calcular_score(combinacion, pesos):
     score += len(grupos_reales) * pesos['carga']
 
     return score
+
+
+# ==========================================================
+# GENERACIÓN EXHAUSTIVA OPTIMIZADA
+# ==========================================================
+def construir_grupos_para_generacion(materias_db):
+    """Prepara las opciones activas y añade N/A a las materias opcionales."""
+    grupos_input = []
+    materias_omitidas = []
+
+    for materia in materias_db:
+        grupos_validos = [
+            grupo
+            for grupo in materia.get("grupos", [])
+            if grupo.get("activo", True)
+        ]
+
+        if grupos_validos and not materia.get("obligatoria", True):
+            grupos_validos = grupos_validos + [{
+                "gpo": "N/A",
+                "profesor": "",
+                "horario": "",
+                "dias": "",
+                "intervalos": [],
+                "calificacion": 0,
+                "materia_nombre": materia.get("materia", "Materia opcional"),
+                "cupo": None,
+                "vacantes": None,
+                "activo": True,
+            }]
+
+        if grupos_validos:
+            grupos_input.append(grupos_validos)
+        else:
+            materias_omitidas.append(materia.get("materia", "Materia"))
+
+    return grupos_input, materias_omitidas
+
+
+def contar_combinaciones_teoricas(grupos_input):
+    """Cuenta el producto cartesiano sin construirlo en memoria."""
+    total = 1
+    for grupos in grupos_input:
+        total *= len(grupos)
+    return total if grupos_input else 0
+
+
+def mascara_horaria_grupo(grupo):
+    """
+    Codifica todos los minutos ocupados por un grupo en un entero de 8,640 bits.
+
+    La intersección entre dos horarios se comprueba con una sola operación AND,
+    conservando precisión de un minuto y sin aproximar a bloques de 30 minutos.
+    """
+    mascara = 0
+    for intervalo in grupo.get("intervalos", []):
+        dia = intervalo.get("dia")
+        indice_dia = DIAS_ORDEN.get(dia)
+        if indice_dia is None:
+            continue
+
+        try:
+            inicio = max(0, min(1440, int(intervalo.get("inicio", 0))))
+            fin = max(0, min(1440, int(intervalo.get("fin", 0))))
+        except (TypeError, ValueError):
+            continue
+
+        if fin <= inicio:
+            continue
+
+        desplazamiento = indice_dia * 1440 + inicio
+        mascara_intervalo = ((1 << (fin - inicio)) - 1) << desplazamiento
+        mascara |= mascara_intervalo
+
+    return mascara
+
+
+def _densidad_conflictos_materia(indice, opciones, mascaras_por_id):
+    """Estima qué tan útil es procesar una materia temprano para podar ramas."""
+    conflictos = 0
+    comparaciones = 0
+    grupos_a = opciones[indice]
+
+    for otro_indice, grupos_b in enumerate(opciones):
+        if otro_indice == indice:
+            continue
+        for grupo_a in grupos_a:
+            mascara_a = mascaras_por_id[id(grupo_a)]
+            for grupo_b in grupos_b:
+                comparaciones += 1
+                if mascara_a & mascaras_por_id[id(grupo_b)]:
+                    conflictos += 1
+
+    return conflictos / comparaciones if comparaciones else 0.0
+
+
+def generar_top_horarios_exhaustivo(
+    grupos_input,
+    pesos,
+    config_dias,
+    w_dias,
+    top_k=10,
+    progreso_callback=None,
+):
+    """
+    Recorre todas las combinaciones potencialmente válidas con backtracking.
+
+    No existe un límite artificial de combinaciones. Cuando una selección parcial
+    ya tiene un traslape, elimina de una vez toda la rama descendiente. Por tanto,
+    no pierde ningún horario válido y evita evaluar combinaciones imposibles.
+    """
+    if not grupos_input:
+        return [], {
+            "total_teorico": 0,
+            "procesadas_equivalentes": 0,
+            "combinaciones_validas": 0,
+            "combinaciones_podadas": 0,
+            "nodos_revisados": 0,
+            "duracion_segundos": 0.0,
+        }
+
+    inicio_busqueda = time.perf_counter()
+    total_teorico = contar_combinaciones_teoricas(grupos_input)
+
+    # Precalcular las máscaras una sola vez.
+    mascaras_por_id = {
+        id(grupo): mascara_horaria_grupo(grupo)
+        for grupos in grupos_input
+        for grupo in grupos
+    }
+
+    # Menor número de candidatos primero; en empate, procesa antes la materia
+    # que presenta más conflictos. Este orden aumenta la poda sin cambiar el
+    # conjunto de horarios evaluados ni el resultado final.
+    indices_originales = list(range(len(grupos_input)))
+    densidades = {
+        indice: _densidad_conflictos_materia(
+            indice,
+            grupos_input,
+            mascaras_por_id,
+        )
+        for indice in indices_originales
+    }
+    orden_indices = sorted(
+        indices_originales,
+        key=lambda indice: (
+            len(grupos_input[indice]),
+            -densidades[indice],
+        ),
+    )
+
+    opciones_ordenadas = []
+    for indice in orden_indices:
+        grupos = list(grupos_input[indice])
+        # Solo cambia el orden de exploración. Los grupos con mejor nota se
+        # intentan primero para llenar rápidamente el heap con buenas opciones.
+        grupos.sort(
+            key=lambda grupo: (
+                grupo.get("gpo") == "N/A",
+                -float(grupo.get("calificacion", 0) or 0),
+            )
+        )
+        opciones_ordenadas.append(grupos)
+
+    # Cantidad de combinaciones representadas por una rama desde cada nivel.
+    producto_sufijo = [1] * (len(opciones_ordenadas) + 1)
+    for posicion in range(len(opciones_ordenadas) - 1, -1, -1):
+        producto_sufijo[posicion] = (
+            producto_sufijo[posicion + 1]
+            * len(opciones_ordenadas[posicion])
+        )
+
+    top_heap = []
+    seleccion_original = [None] * len(grupos_input)
+    combinaciones_validas = 0
+    combinaciones_podadas = 0
+    procesadas_equivalentes = 0
+    nodos_revisados = 0
+    secuencia_heap = 0
+    ultimo_reporte = 0.0
+
+    def reportar(forzar=False):
+        nonlocal ultimo_reporte
+        if progreso_callback is None:
+            return
+        ahora = time.perf_counter()
+        if forzar or ahora - ultimo_reporte >= 0.15:
+            progreso_callback({
+                "total_teorico": total_teorico,
+                "procesadas_equivalentes": procesadas_equivalentes,
+                "combinaciones_validas": combinaciones_validas,
+                "combinaciones_podadas": combinaciones_podadas,
+                "nodos_revisados": nodos_revisados,
+                "duracion_segundos": ahora - inicio_busqueda,
+            })
+            ultimo_reporte = ahora
+
+    def backtrack(posicion, mascara_acumulada):
+        nonlocal combinaciones_validas
+        nonlocal combinaciones_podadas
+        nonlocal procesadas_equivalentes
+        nonlocal nodos_revisados
+        nonlocal secuencia_heap
+
+        if posicion == len(opciones_ordenadas):
+            combinacion = tuple(seleccion_original)
+            combinaciones_validas += 1
+            procesadas_equivalentes += 1
+
+            score = calcular_score(combinacion, pesos)
+            score += calcular_penalizacion_por_dia(
+                {"materias": combinacion},
+                config_dias,
+                w_dias=w_dias,
+            )
+
+            secuencia_heap += 1
+            elemento = (score, secuencia_heap, combinacion)
+            if len(top_heap) < top_k:
+                heapq.heappush(top_heap, elemento)
+            elif score > top_heap[0][0]:
+                heapq.heapreplace(top_heap, elemento)
+
+            reportar()
+            return
+
+        indice_original = orden_indices[posicion]
+        descendientes_por_candidato = producto_sufijo[posicion + 1]
+
+        for grupo in opciones_ordenadas[posicion]:
+            nodos_revisados += 1
+            mascara_grupo = mascaras_por_id[id(grupo)]
+
+            if mascara_acumulada & mascara_grupo:
+                # Todas las elecciones restantes de esta rama serían inválidas.
+                combinaciones_podadas += descendientes_por_candidato
+                procesadas_equivalentes += descendientes_por_candidato
+                reportar()
+                continue
+
+            seleccion_original[indice_original] = grupo
+            backtrack(posicion + 1, mascara_acumulada | mascara_grupo)
+            seleccion_original[indice_original] = None
+
+    backtrack(0, 0)
+    reportar(forzar=True)
+
+    mejores = sorted(top_heap, key=lambda item: item[0], reverse=True)
+    posibles = [
+        {"materias": combinacion, "score": score}
+        for score, _, combinacion in mejores
+    ]
+
+    estadisticas = {
+        "total_teorico": total_teorico,
+        "procesadas_equivalentes": procesadas_equivalentes,
+        "combinaciones_validas": combinaciones_validas,
+        "combinaciones_podadas": combinaciones_podadas,
+        "nodos_revisados": nodos_revisados,
+        "duracion_segundos": time.perf_counter() - inicio_busqueda,
+        "orden_materias": orden_indices,
+    }
+    return posibles, estadisticas
+
+
+def formato_numero_entero(valor):
+    try:
+        return f"{int(valor):,}"
+    except (TypeError, ValueError):
+        return "0"
 
 # EXPORTACIÓN A CALENDARIO (.ics)
 def _proxima_fecha_para_dia(dia_str):
@@ -1164,7 +2007,7 @@ def dataframe_a_png(df_text, df_color=None):
 
 # --- INTERFAZ DE USUARIO ---
 st.title("Generador de Horarios FI")
-st.caption("Versión 4.1: recuperación y guardado automático en el navegador")
+st.caption("Genera, compara y guarda opciones de horario sin traslapes")
 
 if "materias_db" not in st.session_state:
     st.session_state.materias_db = []
@@ -1262,40 +2105,52 @@ if st.session_state.get("mensaje_restauracion"):
         st.toast(mensaje, icon="💾")
 
 # --- GUÍA DE USO DETALLADA ---
-with st.expander("Instrucciones de uso (Actualizado)", expanded=False):
+with st.expander("📘 Cómo usar el generador", expanded=False):
     st.markdown("""
-    ### Pasos rápidos:
-    Para más detalles, consulta la guía en [GitHub](https://github.com/Prevaricare/Creador-de-hoarios-fi-unam/tree/main).
+    ### Pasos rápidos
 
-    **1. Busca tu Clave:**
-    Si no sabes la clave de tu materia (ej. 1120, 1601), consúltala en los [Mapas Curriculares Oficiales](http://escolar.ingenieria.unam.mx/mapas/).
+    **1. Agrega tus materias**
 
-    **2. Ingresa y Agrega:**
-    Escribe las claves en el menú de la izquierda. Puedes ingresarlas **una por una** o **varias juntas separadas por comas** (ej. `1730` o `1120, 1601, 32`) y presiona **Agregar Materias**.
+    Escribe una clave, o varias separadas por comas, por ejemplo: `1730` o `1120, 1601, 32`. Puedes presionar **Enter** o usar el botón **Agregar materias**.
 
-    **3. Revisa Grupos y Cupos:**
-    En la lista de la derecha verás el cupo total y las vacantes restantes de cada grupo.
-    * **Desmarca la casilla** ☑️ de los grupos que no te interesen para que el generador los ignore.
-    * Usa **🔄 Refrescar vacantes** para actualizar cupo, vacantes y horarios sin borrar tus materias.
+    Si no conoces la clave, puedes revisarla en los [Mapas Curriculares Oficiales](http://escolar.ingenieria.unam.mx/mapas/).
 
-    **4. Consulta Promedios de Profesores:**
-    Dentro de cada materia, presiona **🔍 Buscar sugerencias de calificación (IngenieriaTracker)** para mostrar una **sugerencia de promedio** por profesor.
+    **2. Revisa tus grupos**
 
-    * Esta sugerencia **NO modifica** tu calificación manual.
-    * Si no hay coincidencia, se mostrará **"No encontrado"**.
-    * Puedes dar click en **(Ver reseñas: #)** para abrir el perfil del profesor.
+    Cada materia muestra profesor, horario, salón o modalidad, cupo total y vacantes restantes.
 
-    **5. Personaliza:**
-    * **Bloqueos:** Agrega tus horas de comida, trabajo o traslado en el panel izquierdo ("Actividad Manual").
-    * **Pesos:** Ahora se ajustan en la **columna izquierda**, en la sección **"⚙️ Configuración de Pesos"** (evitar huecos, preferencia de turno, etc.).
-    * **Guardado automático (Experimental):** Tus materias, grupos y preferencias se recuperan al abrir la app y se guardan después de cada cambio. El JSON es solo un respaldo opcional.
+    * Activa solamente los grupos que sí aceptarías en tu horario.
+    * Los grupos con **0 vacantes** aparecen desmarcados y en rojo, pero todavía puedes activarlos manualmente.
+    * Puedes marcar una materia como **Opcional** para que el generador la omita cuando sea necesario.
+    * Usa **🔄 Refrescar vacantes** para consultar nuevamente la información publicada por la Facultad sin borrar tu selección.
 
-    **6. Genera:**
-    Presiona el botón al final para ver las mejores combinaciones posibles.
+    **3. Consulta las calificaciones de profesores**
 
+    Usa **⭐ Consultar profesores** para revisar las calificaciones de IngenieríaTracker. Cuando la coincidencia del nombre es exacta o suficientemente probable, la calificación se aplica automáticamente; de cualquier forma puedes cambiarla manualmente.
 
-    ⚠️ **Aviso importante:** Esta app **NO es dueña** de IngenieriaTracker ni está afiliada.  
-    Todo el crédito de la base de datos de las reseñas a **www.ingenieriatracker.com**.
+    Junto a cada profesor puedes abrir sus reseñas de IngenieríaTracker o usar el enlace discreto **Buscar en Google**.
+
+    **4. Personaliza tu horario**
+
+    * En **🕒 Bloquear una hora** puedes agregar trabajo, comida, transporte u otra actividad que no deba traslaparse.
+    * En **⚙️ Preferencias del horario** puedes priorizar turno, menos horas muertas, mejores profesores o una mayor cantidad de materias.
+    * La configuración avanzada por día permite preferir, limitar o evitar días específicos.
+
+    **5. Genera y compara**
+
+    Antes de comenzar se muestra el número de combinaciones teóricas. Si dejaste muchos grupos activos, la búsqueda puede tardar más, pero el sistema descarta anticipadamente las ramas con traslapes y no se queda solamente con las primeras combinaciones.
+
+    Los resultados se pueden descargar como imagen o calendario `.ics`. Los grupos sin vacantes quedan marcados con una advertencia dentro del horario.
+
+    **6. Si no existe un horario posible**
+
+    En lugar de mostrar solamente un error, la app señala las materias, grupos, días y horas con más conflictos. También busca grupos alternativos o materias que podrías dejar como opcionales para desbloquear el horario.
+
+    **7. Tu progreso se guarda automáticamente**
+
+    Materias, grupos, calificaciones, bloqueos y preferencias se guardan en este navegador y se intentan recuperar cuando vuelvas a abrir la app. No necesitas descargar el JSON cada vez; ese archivo es solamente un respaldo opcional para mover tu configuración a otro navegador o dispositivo.
+
+    ⚠️ **Aviso importante:** Esta app **NO es dueña** de IngenieríaTracker ni está afiliada. Todo el crédito de las reseñas pertenece a **www.ingenieriatracker.com**.
     """)
 
 
@@ -1309,18 +2164,18 @@ col_in, col_list = st.columns([1, 1.2])
 # COLUMNA IZQUIERDA: ENTRADA DE DATOS
 # ==========================================
 with col_in:
-    st.subheader("1. Carga de Materias")
+    st.subheader("1. Agrega tus materias")
     
-    st.caption("Inicia aquí ingresando tus claves y presiona **Agregar Materias**.")
+    st.caption("Escribe una o varias claves separadas por comas. Presiona **Enter** o usa el botón para agregarlas.")
     
     # Un formulario permite agregar las claves tanto con el botón como con Enter.
     with st.form("form_agregar_materias", clear_on_submit=True):
         clave_input = st.text_input(
-            "## Claves:",
+            "Claves de materias",
             placeholder="Ejemplo: 1730 ó 1120, 1601, 32"
         )
         agregar_materias = st.form_submit_button(
-            "Agregar Materias",
+            "Agregar materias",
             width="stretch",
         )
 
@@ -1377,16 +2232,16 @@ with col_in:
     # ==========================================================
     # --- AGREGAR ACTIVIDAD Personal ---
     # ==========================================================
-    with st.expander("Agregar Actividad Personal", expanded=False):
-        st.info("Bloquea horarios para Trabajo, Comida, Transporte, etc.")
-        act_nombre = st.text_input("Nombre de la actividad", "Actividad Personal")
+    with st.expander("🕒 Bloquear una hora", expanded=False):
+        st.info("Agrega trabajo, comida, transporte o cualquier actividad que no deba traslaparse con tus clases.")
+        act_nombre = st.text_input("Nombre de la actividad", "Actividad personal")
         act_dias = st.multiselect("Días", ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab"])
 
         c_hora1, c_hora2 = st.columns(2)
         t_inicio = c_hora1.time_input("Inicio")
         t_fin = c_hora2.time_input("Fin")
 
-        if st.button("Agregar Actividad", width="stretch"):
+        if st.button("Agregar bloqueo", width="stretch"):
             if act_nombre and act_dias:
                 str_horario = f"{t_inicio.strftime('%H:%M')} a {t_fin.strftime('%H:%M')}"
                 intervalos_manual = extraer_intervalos(str_horario, act_dias)
@@ -1427,8 +2282,8 @@ with col_in:
     # ==========================================================
     # CONFIGURACIÓN (ANTES SIDEBAR) - AHORA EN COLUMNA IZQUIERDA
     # ==========================================================
-    st.caption("Configura aqui las preferencias de tu horario")
-    with st.expander("⚙️ Configuración de Pesos", expanded=True):
+    st.caption("Elige qué cosas quieres priorizar al ordenar tus opciones.")
+    with st.expander("⚙️ Preferencias del horario", expanded=True):
 
         if "pref_tipo_turno_widget" not in st.session_state:
             st.session_state.pref_tipo_turno_widget = st.session_state.get(
@@ -1451,7 +2306,7 @@ with col_in:
         )
 
         w_turno = st.slider(
-            "Importancia del Turno",
+            "Priorizar el turno elegido",
             0, 100,
             key="pref_w_turno_widget",
             help="Qué tanto debe esforzarse el sistema por respetar tu preferencia de mañana o tarde."
@@ -1472,10 +2327,10 @@ with col_in:
         )
 
         w_carga = st.slider(
-            "Cantidad de materias",
+            "Priorizar más materias",
             0, 100,
             key="pref_w_carga_widget",
-            help="Intenta inscribir el mayor número posible de materias de tu lista."
+            help="Da prioridad a las opciones que incluyan más materias, especialmente cuando tienes materias opcionales."
         )
 
         pesos = {
@@ -1503,10 +2358,10 @@ with col_in:
                 "Sab": {"modo": "Normal", "preferencia": "Mixto",    "max_bloques": 10, "evitar": False},
             }
 
-        with st.expander("⚙️ Configuración avanzada por día `experimental`", expanded=False):
+        with st.expander("⚙️ Preferencias avanzadas por día `experimental`", expanded=False):
             st.caption(
-                "Personaliza tus preferencias por día. "
-                "Ejemplo: Lunes/Miércoles temprano y ligero, Martes/Jueves pesado, Viernes libre."
+                "Ajusta días específicos solamente si lo necesitas. "
+                "Ejemplo: lunes y miércoles temprano, martes y jueves con más clases, o viernes libre."
             )
 
             # Peso global de esta configuración (qué tanto afecta al score)
@@ -1574,7 +2429,7 @@ with col_in:
                     }
 
             st.markdown("---")
-            st.success("✅ Configuración avanzada guardada automáticamente.")
+            st.success("✅ Los cambios se guardan automáticamente.")
 
     st.markdown("---")
 
@@ -1584,9 +2439,9 @@ with col_in:
     with st.expander("🧪 Funciones experimentales", expanded=False):
         st.markdown("#### 💾 Guardado automático y respaldo")
         st.caption(
-            "La app guarda automáticamente materias, grupos, calificaciones y "
-            "preferencias en este navegador. Al volver a abrirla, intenta "
-            "recuperarlas sin que tengas que pulsar ningún botón."
+            "La app guarda automáticamente materias, grupos, calificaciones, bloqueos y "
+            "preferencias en este navegador. Al volver a abrirla intenta "
+            "recuperar todo sin que tengas que pulsar ningún botón."
         )
 
         if local_storage is None:
@@ -1624,7 +2479,7 @@ with col_in:
 
         st.markdown("---")
         st.caption(
-            "El archivo JSON es opcional. Sirve para mover tu configuración a "
+            "El JSON es opcional: úsalo únicamente para mover tu configuración a "
             "otro navegador o conservar una copia manual."
         )
         respaldo_json = json.dumps(
@@ -1667,19 +2522,19 @@ with col_list:
 
     c_header_1, c_header_2, c_header_3, c_header_4 = st.columns([2, 1, 1.25, 1])
 
-    c_header_1.subheader("2. Materias Registradas")
+    c_header_1.subheader("2. Revisa materias y grupos")
 
     if c_header_2.button("🔄 Refrescar vacantes", use_container_width=True):
         refrescar_vacantes()
         st.rerun()
 
-    if c_header_3.button("⭐ Actualizar calificaciones", use_container_width=True):
-        with st.spinner("Consultando IngenieríaTracker..."):
+    if c_header_3.button("⭐ Consultar profesores", use_container_width=True):
+        with st.spinner("Consultando calificaciones en IngenieríaTracker..."):
             resumen_api = actualizar_calificaciones_automaticamente()
         st.success(
-            f"Aplicadas: {resumen_api['aplicados']} · "
-            f"Dudosas: {resumen_api['dudosos']} · "
-            f"No encontradas: {resumen_api['no_encontrados']}"
+            f"Actualizadas: {resumen_api['aplicados']} · "
+            f"Coincidencias dudosas: {resumen_api['dudosos']} · "
+            f"Sin resultado: {resumen_api['no_encontrados']}"
         )
         st.rerun()
 
@@ -1690,7 +2545,7 @@ with col_list:
 
 
     if not st.session_state.materias_db:
-        st.info("Tu lista está vacía. Comienza ingresando una clave a la izquierda.")
+        st.info("Todavía no has agregado materias. Escribe una clave en la sección de la izquierda para comenzar.")
 
     for i, m in enumerate(st.session_state.materias_db):
         status = " (Opcional)" if not m['obligatoria'] else ""
@@ -1698,12 +2553,12 @@ with col_list:
         with st.expander(f"{m['materia']}{status}", expanded=st.session_state.expand_materias):
 
             c_api_1, c_api_2 = st.columns([1, 1])
-            if c_api_1.button("⭐ Actualizar notas de profesores", key=f"api_mat_{i}", width="stretch"):
-                with st.spinner("Consultando promedios de profesores..."):
+            if c_api_1.button("⭐ Consultar profesores", key=f"api_mat_{i}", width="stretch"):
+                with st.spinner("Consultando calificaciones de profesores..."):
                     resumen_api = actualizar_calificaciones_automaticamente(i)
                 c_api_2.success(
-                    f"Aplicadas: {resumen_api['aplicados']} · "
-                    f"Dudosas: {resumen_api['dudosos']} · "
+                    f"Actualizadas: {resumen_api['aplicados']} · "
+                    f"Coincidencias dudosas: {resumen_api['dudosos']} · "
                     f"Sin resultado: {resumen_api['no_encontrados']}"
                 )
                 st.rerun()
@@ -1757,7 +2612,7 @@ with col_list:
 
                 if consultado:
                     if sug is not None:
-                        sug_txt = f"⭐ Sugerencia Calificacion: <strong>{float(sug):.2f}</strong>"
+                        sug_txt = f"⭐ Calificación consultada: <strong>{float(sug):.2f}</strong>"
 
                         if num_res is not None:
                             # Preferimos el nombre exacto que regresó la API (mejor match)
@@ -1773,7 +2628,7 @@ with col_list:
                                 sug_txt += f" <span style='color:gray'>(reseñas: {num_res})</span>"
 
                     else:
-                        sug_txt = "<span style='color:gray;'>⭐ Sugerencia Calificacion: No encontrado</span>"
+                        sug_txt = "<span style='color:gray;'>⭐ Calificación consultada: No encontrada</span>"
 
                 salon = g.get("salon", None)
                 modalidad = normalizar_modalidad_texto(g.get("modalidad"))
@@ -1871,11 +2726,11 @@ with col_list:
 
 # --- BOTÓN DE GENERACIÓN ---
 st.markdown("---")
-st.subheader("3. Generación de horarios")
+st.subheader("3. Genera tus horarios")
 
 st.caption(
-    "Aquí se generan combinaciones optimizadas con tus materias activas. "
-    "El sistema iterará y te mostrará las mejores opciones según tus pesos (huecos, turno, profes, etc.)."
+    "El sistema buscará las mejores opciones usando los grupos activos y tus preferencias. "
+    "Si no existe una combinación válida, mostrará dónde están los conflictos y qué podrías cambiar."
 )
 
 # ============================
@@ -1895,101 +2750,101 @@ c_vis2.caption(
     "Los grupos sin vacantes aparecen desmarcados al cargarlos, pero puedes activarlos manualmente."
 )
 
-if st.button("Generar combinaciones optimizadas", width="stretch"):
+# Conteo visible antes de generar. No descarga datos ni construye combinaciones.
+grupos_preview, _materias_omitidas_preview = construir_grupos_para_generacion(
+    st.session_state.materias_db
+)
+total_comb_preview = contar_combinaciones_teoricas(grupos_preview)
+if total_comb_preview:
+    st.markdown(
+        f"**Opciones posibles antes de revisar traslapes:** "
+        f"`{formato_numero_entero(total_comb_preview)}`"
+    )
+    st.caption(
+        "La búsqueda optimizada descarta ramas con traslapes antes de completarlas, "
+        "pero evalúa todos los horarios que todavía pueden ser válidos."
+    )
+
+if st.button("Generar mis horarios", width="stretch"):
     if not st.session_state.materias_db:
         st.error("No puedes generar horarios sin materias. Agrega al menos una.")
     else:
-        grupos_input = []
+        grupos_input, materias_omitidas = construir_grupos_para_generacion(
+            st.session_state.materias_db
+        )
 
-        materias_omitidas = []
-
-        for m in st.session_state.materias_db:
-            grupos_validos = [g for g in m["grupos"] if g.get("activo", True)]
-
-            # Una materia marcada como opcional agrega la alternativa real de no cursarla.
-            if grupos_validos and not m.get("obligatoria", True):
-                grupos_validos = grupos_validos + [{
-                    "gpo": "N/A",
-                    "profesor": "",
-                    "horario": "",
-                    "dias": "",
-                    "intervalos": [],
-                    "calificacion": 0,
-                    "materia_nombre": m.get("materia", "Materia opcional"),
-                    "cupo": None,
-                    "vacantes": None,
-                    "activo": True,
-                }]
-
-            if grupos_validos:
-                grupos_input.append(grupos_validos)
-            else:
-                materias_omitidas.append(m["materia"])
-                continue
-
-        # Aviso al usuario si se omitieron materias
         if materias_omitidas:
             st.warning(
                 "⚠️ Se omitieron materias porque no tienen ningún grupo activo:\n\n"
                 + "\n".join([f"- {x}" for x in materias_omitidas])
-                + "\n\n💡 Tip: Activa al menos 1 grupo si quieres que se considere en el horario."
+                + "\n\n💡 Tip: Activa al menos un grupo si quieres que se considere."
             )
 
-        # Si al final no quedó nada para combinar
         if not grupos_input:
             st.error("No hay grupos activos para generar horarios. Activa al menos un grupo.")
             st.stop()
 
+        total_comb = contar_combinaciones_teoricas(grupos_input)
+        st.info(
+            f"Se analizará un espacio de **{formato_numero_entero(total_comb)} "
+            "combinaciones teóricas**. Los traslapes se podarán antes de construir "
+            "cada combinación completa."
+        )
 
-        total_comb = 1
-        for g in grupos_input:
-            total_comb *= len(g)
-
-        if total_comb > 5_000_000:
+        if total_comb >= 1_000_000:
             st.warning(
-                f"⚠️ Se detectaron {total_comb:,} combinaciones posibles. "
-                "Esto podría saturar la memoria. Intenta desactivar algunos grupos o reducir materias."
+                f"⚠️ Hay **{formato_numero_entero(total_comb)} combinaciones**. "
+                "Como permanecen muchos grupos activos o hay pocas restricciones, "
+                "la búsqueda exhaustiva puede tardar más de lo habitual. No se "
+                "cortará después de las primeras opciones: se revisarán todas las "
+                "ramas que puedan contener un horario válido."
+            )
+        elif total_comb >= 100_000:
+            st.info(
+                "La selección es relativamente amplia. La generación puede tardar "
+                "un poco más, aunque la poda de traslapes suele reducir mucho el trabajo."
             )
 
-        generador_comb = itertools.product(*grupos_input)
+        barra_progreso = st.progress(0.0)
+        texto_progreso = st.empty()
 
-        # ==========================================================
-        # TOP-10 incremental (NO guarda todas las combinaciones)
-        # ==========================================================
-        TOP_K = 10
-        top_heap = []
+        def actualizar_progreso_generacion(datos):
+            total = max(1, int(datos.get("total_teorico", 1)))
+            procesadas = min(total, int(datos.get("procesadas_equivalentes", 0)))
+            barra_progreso.progress(min(1.0, procesadas / total))
+            texto_progreso.caption(
+                f"Analizadas o descartadas: {formato_numero_entero(procesadas)} / "
+                f"{formato_numero_entero(total)} · "
+                f"Horarios válidos: {formato_numero_entero(datos.get('combinaciones_validas', 0))} · "
+                f"Combinaciones descartadas: {formato_numero_entero(datos.get('combinaciones_podadas', 0))}"
+            )
 
-        MAX_COMBINACIONES_A_REVISAR = 1000000
-        barra_progreso = st.progress(0)
-
-        for idx, comb in enumerate(generador_comb):
-            if idx >= MAX_COMBINACIONES_A_REVISAR:
-                st.warning(
-                    f"Se revisaron las primeras {MAX_COMBINACIONES_A_REVISAR} combinaciones "
-                    "y se detuvo para no saturar."
-                )
-                break
-
-            if es_horario_valido(comb):
-                sc = calcular_score(comb, pesos)
-                sc += calcular_penalizacion_por_dia(
-                    {"materias": comb},
-                    st.session_state.config_dias,
-                    w_dias=w_dias,
-                )
-
-                if len(top_heap) < TOP_K:
-                    heapq.heappush(top_heap, (sc, idx, comb))
-                else:
-                    if sc > top_heap[0][0]:
-                        heapq.heapreplace(top_heap, (sc, idx, comb))
-
-            if idx % 5000 == 0:
-                progreso_val = min(idx / min(total_comb, MAX_COMBINACIONES_A_REVISAR), 1.0)
-                barra_progreso.progress(progreso_val)
+        posibles, estadisticas_generacion = generar_top_horarios_exhaustivo(
+            grupos_input=grupos_input,
+            pesos=pesos,
+            config_dias=st.session_state.config_dias,
+            w_dias=w_dias,
+            top_k=10,
+            progreso_callback=actualizar_progreso_generacion,
+        )
         barra_progreso.progress(1.0)
-        top_heap_sorted = sorted(top_heap, key=lambda x: x[0], reverse=True)
-        posibles = [{"materias": comb, "score": sc} for (sc, _, comb) in top_heap_sorted]
+        texto_progreso.caption(
+            f"Búsqueda completa: {formato_numero_entero(estadisticas_generacion['total_teorico'])} "
+            f"combinaciones teóricas · "
+            f"{formato_numero_entero(estadisticas_generacion['combinaciones_validas'])} horarios válidos · "
+            f"{formato_numero_entero(estadisticas_generacion['combinaciones_podadas'])} combinaciones "
+            f"descartadas anticipadamente por traslape · "
+            f"{estadisticas_generacion['duracion_segundos']:.2f} s."
+        )
+
+        # La búsqueda exhaustiva ya distingue entre cero horarios válidos y un
+        # corte artificial, por lo que el diagnóstico solo se ejecuta cuando la
+        # incompatibilidad es real.
+        diagnostico_conflictos = None
+        if not posibles:
+            diagnostico_conflictos = analizar_conflictos_horario(
+                st.session_state.materias_db
+            )
 
         # ==========================================================
         # Mostrar resultados
@@ -1999,7 +2854,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
             # El score completo ya se aplicó durante la búsqueda del top 10.
             posibles = sorted(posibles, key=lambda x: x["score"], reverse=True)
 
-            st.success("¡Horarios generados con éxito!")
+            st.success("¡Listo! Encontramos tus mejores opciones de horario.")
             tabs = st.tabs([f"Opción {i+1}" for i in range(len(posibles))])
 
 
@@ -2191,7 +3046,7 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                     # ============================
                     # RESUMEN DE MATERIAS (NUEVO)
                     # ============================
-                    st.markdown("### 📋 Resumen del horario ")
+                    st.markdown("### 📋 Materias de esta opción")
 
                     lista_resumen = []
                     for g in opcion["materias"]:
@@ -2243,13 +3098,13 @@ if st.button("Generar combinaciones optimizadas", width="stretch"):
                     )
 
         else:
-            st.warning(
-                "No se encontraron combinaciones válidas. "
-                "Intenta relajar tus restricciones (ej. permitir huecos o más turnos)."
-            )
+            st.markdown("## No encontramos un horario compatible")
+            if diagnostico_conflictos is None:
+                diagnostico_conflictos = analizar_conflictos_horario(
+                    st.session_state.materias_db
+                )
+            mostrar_diagnostico_conflictos(diagnostico_conflictos)
         del posibles
-        del top_heap
-        del top_heap_sorted
         gc.collect()
 
 
